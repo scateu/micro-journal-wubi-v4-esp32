@@ -4,6 +4,7 @@
 
 //
 #include "service/Editor/Editor.h"
+#include "service/Tools/Tools.h"
 
 void wordcounter_service()
 {
@@ -93,7 +94,14 @@ int wordcounter_file(const char *filename)
         for (size_t i = 0; i < readNow; ++i)
         {
             char c = buffer[i];
-            if (isAlphaNumeric(c))
+            // each CJK (multi-byte UTF-8) character counts as one word
+            if ((uint8_t)c >= 0x80)
+            {
+                if (!utf8_is_continuation((uint8_t)c))
+                    wordCount++;
+                inWord = false;
+            }
+            else if (isAlphaNumeric(c))
             {
                 if (!inWord)
                 {
@@ -123,7 +131,14 @@ int wordcounter_buffer(const char *buffer)
         if (BUFFER_SIZE <= i)
             break;
 
-        if (std::isalnum(buffer[i]))
+        // each CJK (multi-byte UTF-8) character counts as one word
+        if ((uint8_t)buffer[i] >= 0x80)
+        {
+            if (!utf8_is_continuation((uint8_t)buffer[i]))
+                ++count;
+            inWord = false;
+        }
+        else if (std::isalnum(buffer[i]))
         {
             if (!inWord)
             {

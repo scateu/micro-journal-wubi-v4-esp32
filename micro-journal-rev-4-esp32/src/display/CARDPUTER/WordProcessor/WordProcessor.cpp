@@ -3,12 +3,17 @@
 
 //
 #include "service/Editor/Editor.h"
+#include "service/Tools/Tools.h"
 #include "keyboard/keyboard.h"
 #include "display/display.h"
 
 //
 #include "display/CARDPUTER/display_CARDPUTER.h"
 #include <u8g2_fonts.h>
+
+#ifdef USE_IME
+#include "service/IME/IME.h"
+#endif
 
 extern const uint8_t u8g2_font_profont22_tf[];
 
@@ -19,6 +24,10 @@ int screen_height = 135;
 //
 const int font_width = 14;
 const int font_height = 22;
+
+// A CJK glyph is rendered double-width so it stays squared with the
+// monospaced Latin font used for the body text.
+const int cjk_width = font_width * 2;
 
 // Lines will be rendered at the bottom on the screen
 // need to calculate the Y position considering the status bar height
@@ -85,11 +94,85 @@ void WP_render()
     // STATUS
     WP_render_status();
 
+    // CHINESE IME CANDIDATE BAR (drawn last so it sits on top)
+    WP_render_ime();
+
     if (clear_background)
         clear_background = false;
 
     // Editor House Keeping Tasks
     Editor::getInstance().loop();
+}
+
+//
+// Wubi IME candidate bar.
+//
+// While the user is composing a Wubi code, an overlay strip is drawn over the
+// edit line showing the typed code and the numbered candidate hanzi. When the
+// composition clears, the strip is wiped once so the underlying text reappears
+// on the next frame.
+void WP_render_ime()
+{
+#ifdef USE_IME
+    JsonDocument &app = status();
+    uint16_t background_color = app["config"]["background_color"].as<uint16_t>();
+    uint16_t foreground_color = app["config"]["foreground_color"].as<uint16_t>();
+
+    IME &ime = IME::getInstance();
+
+    static bool was_composing = false;
+    bool composing = ime.active() && ime.composing();
+
+    // The bar covers the edit line and the row just below it.
+    const int barY = editY;
+    const int barH = font_height + cursorHeight + 2;
+
+    if (!composing)
+    {
+        // just stopped composing - clear the strip once and force a redraw of
+        // the text underneath
+        if (was_composing)
+        {
+            M5Cardputer.Display.fillRect(0, barY, screen_width, barH, background_color);
+            clear_background = true;
+            was_composing = false;
+        }
+        return;
+    }
+    was_composing = true;
+
+    // background strip (inverted so it stands out from the document)
+    M5Cardputer.Display.fillRect(0, barY, screen_width, barH, foreground_color);
+
+    // typed Wubi code, drawn in the Latin body font
+    M5Cardputer.Display.setFont(&g_profont22);
+    M5Cardputer.Display.setTextColor(background_color, foreground_color);
+    String code = ime.composition();
+    M5Cardputer.Display.drawString(code, 2, barY);
+
+    // candidates: "1字 2子 3自 ..." using the Chinese font
+    int x = code.length() * font_width + 10;
+    const std::vector<String> &cands = ime.candidates();
+    for (size_t i = 0; i < cands.size(); i++)
+    {
+        // index digit
+        M5Cardputer.Display.setFont(&g_profont22);
+        M5Cardputer.Display.drawString(String((int)i + 1), x, barY);
+        x += 9;
+
+        // hanzi
+        M5Cardputer.Display.setFont(&fonts::efontCN_16);
+        M5Cardputer.Display.drawString(cands[i], x, barY + 2);
+        x += 20;
+
+        if (x > screen_width - 20)
+            break;
+    }
+
+    // restore body font for subsequent renders
+    M5Cardputer.Display.setFont(&g_profont22);
+    M5Cardputer.Display.setTextColor(foreground_color, background_color);
+#endif
 }
 
 //
@@ -144,38 +227,89 @@ void WP_render_text()
 }
 
 //
+// Advance in pixels of the glyph that starts at byte `line[i]`.
+// ASCII / Latin-1 advance one cell; multi-byte UTF-8 (CJK) advance two.
+static int WP_glyph_width(const char *line, int i)
+{
+    return utf8_char_len((uint8_t)line[i]) >= 2 ? cjk_width : font_width;
+}
+
+// Pixel X of the glyph boundary that sits `byteOffset` bytes into the line.
+// Used by the cursor so it lands between glyphs, not between UTF-8 bytes.
+int WP_line_width_bytes(const char *line, int byteOffset)
+{
+    int x = 0;
+    int i = 0;
+    while (i < byteOffset)
+    {
+        int len = utf8_char_len((uint8_t)line[i]);
+        x += (len >= 2) ? cjk_width : font_width;
+        i += len;
+    }
+    return x;
+}
+
+//
 //
 void WP_render_line(int line_num, int y)
 {
     char *line = Editor::getInstance().linePositions[line_num];
     int length = Editor::getInstance().lineLengths[line_num];
 
-    // render
+    // render, walking the line one UTF-8 character at a time
     int x = 0;
-    for (int i = 0; i < length; i++)
+    int i = 0;
+    while (i < length)
     {
-        // convert extended ascii into a streamlined string
-        uint8_t value = *(line + i);
-        if (value == '\n')
-            continue;
+        uint8_t value = (uint8_t)line[i];
 
+        // newline is a layout marker, never drawn
+        if (value == '\n')
+        {
+            i += 1;
+            continue;
+        }
+
+        int clen = utf8_char_len(value);
+
+        // plain ASCII - keep the existing crisp monospaced glyph
+        if (clen == 1 && value < 0x80)
+        {
+            M5Cardputer.Display.drawChar((char)value, x, y + font_height - 4);
+            x += font_width;
+            i += 1;
+            continue;
+        }
+
+#ifdef USE_IME
+        // a multi-byte UTF-8 run (CJK and friends): draw it with the
+        // built-in Chinese font, then restore the body font. Only compiled for
+        // the Chinese-enabled build so the plain Cardputer firmware does not
+        // link the (large) CJK glyph data.
+        if (clen >= 2 && i + clen <= length)
+        {
+            char glyph[5];
+            memcpy(glyph, line + i, clen);
+            glyph[clen] = '\0';
+
+            M5Cardputer.Display.setFont(&fonts::efontCN_24);
+            M5Cardputer.Display.drawString(glyph, x, y);
+            M5Cardputer.Display.setFont(&g_profont22);
+
+            x += cjk_width;
+            i += clen;
+            continue;
+        }
+#endif
+
+        // stray high byte (e.g. legacy Latin-1 content) - best-effort
         String str = asciiToUnicode(value);
         if (str.length() == 0)
-            M5Cardputer.Display.drawChar((char)value, x, y+font_height-4);
+            M5Cardputer.Display.drawChar((char)value, x, y + font_height - 4);
         else
-            //
             M5Cardputer.Display.drawString(str, x, y);
-
-        //
         x += font_width;
-    }
-
-    if (length > 0)
-    {
-        // Create a temporary null-terminated buffer
-        char temp[length + 1];
-        memcpy(temp, line, length);
-        temp[length] = '\0';
+        i += 1;
     }
 }
 
@@ -189,21 +323,28 @@ void WP_render_cursor()
     uint16_t background_color = app["config"]["background_color"].as<uint16_t>();
     uint16_t foreground_color = app["config"]["foreground_color"].as<uint16_t>();
 
-    // Cursor information
-    static int cursorLinePos_prev = 0;
+    // Cursor information. cursorLinePos is a BYTE offset within the line;
+    // convert it to pixels through the UTF-8 aware width helper so the cursor
+    // lands on a glyph boundary instead of inside a multi-byte character.
+    static int cursorX_prev = 0;
     int cursorLinePos = Editor::getInstance().cursorLinePos;
     int cursorLine = Editor::getInstance().cursorLine;
     int cursorPos = Editor::getInstance().cursorPos;
 
+    char *line = Editor::getInstance().linePositions[cursorLine];
+
     // Calculate Cursor X position
-    // reached the line where cursor is
-    // distance X is cursorPos - pos
     int cursorX = 0;
     if (Editor::getInstance().buffer[cursorPos - 1] != '\n' && cursorLinePos != 0)
     {
-        // font width 12
-        cursorX = cursorLinePos * font_width;
+        cursorX = WP_line_width_bytes(line, cursorLinePos);
     }
+
+    // The underline width matches the glyph the cursor sits under, so a hanzi
+    // gets a full double-width underline.
+    int cursorW = font_width;
+    if (cursorLinePos < Editor::getInstance().lineLengths[cursorLine])
+        cursorW = WP_glyph_width(line, cursorLinePos);
 
     // Blink the cursor every 500 ms
     static bool blink = false;
@@ -215,20 +356,20 @@ void WP_render_cursor()
     }
 
     // Delete previous cursor line
-    if (cursorLinePos != cursorLinePos_prev)
+    if (cursorX != cursorX_prev)
     {
         //
-        M5Cardputer.Display.fillRect(cursorLinePos_prev * font_width, cursorY, font_width, cursorHeight, background_color);
+        M5Cardputer.Display.fillRect(cursorX_prev, cursorY, cjk_width, cursorHeight, background_color);
 
         //
-        cursorLinePos_prev = cursorLinePos;
+        cursorX_prev = cursorX;
     }
 
     // Cursor Blink will be always at the bottom of the screen
     if (blink)
-        M5Cardputer.Display.fillRect(cursorX, cursorY, font_width, cursorHeight, foreground_color);
+        M5Cardputer.Display.fillRect(cursorX, cursorY, cursorW, cursorHeight, foreground_color);
     else
-        M5Cardputer.Display.fillRect(cursorX, cursorY, font_width, cursorHeight, background_color);
+        M5Cardputer.Display.fillRect(cursorX, cursorY, cursorW, cursorHeight, background_color);
 }
 
 //

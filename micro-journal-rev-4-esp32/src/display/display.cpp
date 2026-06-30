@@ -1,5 +1,6 @@
 #include "display.h"
 #include "app/app.h"
+#include "keyboard/keyboard.h"
 
 // 320x240 TFT_eSPI display
 #if defined(ILI9341_DRIVER) || defined(ST7789_DRIVER)
@@ -130,6 +131,11 @@ void display_loop()
 void display_keyboard(int key, bool pressed, int index)
 {
   _debug("[display_keyboard] Key: [%d] pressed: %d index: %d\n", key, pressed, index);
+
+  // Chinese (Wubi) IME: any ASCII key from any keyboard is offered here first.
+  // When the IME consumes it, the key is not forwarded to the screen/editor.
+  if (keyboard_ime_filter(key, pressed))
+    return;
 
 #if defined(ILI9341_DRIVER) || defined(ST7789_DRIVER)
   display_ILI9341_keyboard(key, pressed, index);

@@ -192,6 +192,64 @@ String asciiToUnicode(uint8_t value)
     return extended_ascii[code];
 }
 
+//
+// UTF-8 helpers
+//
+int utf8_char_len(uint8_t lead)
+{
+    if (lead < 0x80)
+        return 1; // ASCII
+    if ((lead & 0xE0) == 0xC0)
+        return 2; // 110xxxxx
+    if ((lead & 0xF0) == 0xE0)
+        return 3; // 1110xxxx (covers all CJK in the BMP)
+    if ((lead & 0xF8) == 0xF0)
+        return 4; // 11110xxx
+    return 1;     // continuation or invalid lead - treat as single byte
+}
+
+bool utf8_is_continuation(uint8_t b)
+{
+    return (b & 0xC0) == 0x80;
+}
+
+uint32_t utf8_decode(const char *s, int &len)
+{
+    uint8_t c = (uint8_t)s[0];
+    len = utf8_char_len(c);
+
+    uint32_t cp;
+    switch (len)
+    {
+    case 2:
+        cp = c & 0x1F;
+        break;
+    case 3:
+        cp = c & 0x0F;
+        break;
+    case 4:
+        cp = c & 0x07;
+        break;
+    default: // ASCII or invalid lead
+        len = 1;
+        return c;
+    }
+
+    // gather continuation bytes; bail out to Latin-1 on truncation
+    for (int i = 1; i < len; i++)
+    {
+        uint8_t cont = (uint8_t)s[i];
+        if (!utf8_is_continuation(cont))
+        {
+            len = 1;
+            return c;
+        }
+        cp = (cp << 6) | (cont & 0x3F);
+    }
+
+    return cp;
+}
+
 String format(const char *format, ...)
 {
     char buffer[256]; // Adjust the size according to your needs

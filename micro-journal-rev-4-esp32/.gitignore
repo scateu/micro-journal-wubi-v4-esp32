@@ -4,3 +4,6 @@
 .vscode/launch.json
 .vscode/ipch
 data/config.json
+
+# Wubi dictionary source cache downloaded by tools/gen_wubi.py
+tools/wubi86.dict.yaml

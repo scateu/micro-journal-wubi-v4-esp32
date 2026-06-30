@@ -11,9 +11,20 @@
 //
 #include "M5Cardputer.h"
 
+#ifdef USE_IME
+#include "service/IME/IME.h"
+#endif
+
 // initialize keymap
 void keypad_cardputer_setup()
 {
+#ifdef USE_IME
+    // Load the Wubi dictionary once at start-up (no-op if missing) and, when it
+    // is available, start in Chinese (Wubi) input mode by default.
+    // Fn + Space still toggles back to plain ASCII typing.
+    if (IME::getInstance().begin())
+        IME::getInstance().setActive(true);
+#endif
 }
 
 ///
@@ -45,6 +56,18 @@ void keypad_cardputer_loop()
             // when FN key is pressed
             if (status.fn)
             {
+#ifdef USE_IME
+                // FN + SPACE -> toggle Chinese (Wubi) input on/off
+                if (status.space)
+                {
+                    IME &ime = IME::getInstance();
+                    // only allow turning it on if the dictionary loaded
+                    if (ime.active() || ime.begin())
+                        ime.toggle();
+                    return;
+                }
+#endif
+
                 // ESC
                 if (M5Cardputer.Keyboard.isKeyPressed('`'))
                 {
@@ -117,14 +140,15 @@ void keypad_cardputer_loop()
 
             else
             {
-                //
+                // Printable keys. The Chinese IME is applied centrally inside
+                // display_keyboard(), so here we just forward the key.
                 for (auto i : status.word)
                 {
                     // process caps lock
                     int ascii = keyboard_caplock_filter(i);
                     _log("[keypad_cardputer_loop] %d %d\n", i, ascii);
 
-                    // i
+                    //
                     display_keyboard(ascii, true, ascii);
                     display_keyboard(ascii, false, ascii);
 
@@ -138,7 +162,11 @@ void keypad_cardputer_loop()
                     keyboard_capslock_toggle();
                 }
 
-                if (status.del)
+                // Plain backspace. On the Cardputer ADV keyboard this arrives as
+                // status.backspace (status.del is reserved for the Fn-layer
+                // DELETE). The IME filter in display_keyboard() turns it into a
+                // code edit while composing.
+                if (status.backspace || status.del)
                 {
                     display_keyboard('\b', true, '\b');
                     display_keyboard('\b', false, '\b');

@@ -45,6 +45,65 @@
 #include <BleKeyboard.h>
 #endif
 
+#ifdef USE_IME
+#include "service/IME/IME.h"
+
+// Re-entrancy guard: while the IME is emitting the bytes of a committed hanzi
+// through display_keyboard(), those bytes must skip the IME filter.
+static bool ime_emitting = false;
+
+// Emit a committed hanzi (UTF-8) as if its bytes were typed. The bytes are all
+// >= 0x80, so they bypass every control-key branch and land in the editor.
+static void ime_emit(const String &hanzi)
+{
+  ime_emitting = true;
+  for (size_t i = 0; i < hanzi.length(); i++)
+  {
+    uint8_t b = (uint8_t)hanzi[i];
+    display_keyboard(b, true, b);
+    display_keyboard(b, false, b);
+  }
+  ime_emitting = false;
+}
+#endif
+
+// Shared Chinese IME gateway used by every keyboard driver.
+bool keyboard_ime_filter(int key, bool pressed)
+{
+#ifdef USE_IME
+  IME &ime = IME::getInstance();
+
+  // Pass through when the IME is off or while we are emitting a commit.
+  if (!ime.active() || ime_emitting)
+    return false;
+
+  // Remember which keys we consumed on press so their matching release is
+  // consumed too (the composition state changes between press and release).
+  static bool consumed[256] = {false};
+
+  if (key < 0 || key > 255)
+    return false;
+
+  if (!pressed)
+  {
+    // release: consume iff we consumed the press
+    bool was = consumed[key];
+    consumed[key] = false;
+    return was;
+  }
+
+  // press: offer the key to the IME
+  String hanzi;
+  bool took = ime.handleKey(key, hanzi);
+  consumed[key] = took;
+  if (took && hanzi.length() > 0)
+    ime_emit(hanzi);
+  return took;
+#else
+  return false;
+#endif
+}
+
 //
 void keyboard_setup()
 {
@@ -457,6 +516,24 @@ void keyboard_HID2Ascii(uint8_t keycode, uint8_t modifier, bool pressed)
     keyboard_capslock_toggle();
     return;
   }
+
+#ifdef USE_IME
+  //////////////////////////////////////////
+  // CTRL + SPACE toggles the Chinese (Wubi) IME on an external USB keyboard
+  // (the equivalent of FN + SPACE on the built-in keyboard).
+  // 0x2C - HID_KEY_SPACE; Ctrl is modifier bit 0 (left) or bit 4 (right).
+  bool ctrl = (modifier & (1UL << 0)) || (modifier & (1UL << 4));
+  if (keycode == 0x2C && ctrl)
+  {
+    if (pressed)
+    {
+      IME &ime = IME::getInstance();
+      if (ime.active() || ime.begin())
+        ime.toggle();
+    }
+    return;
+  }
+#endif
 
   //////////////////////////////////////////
   // MENU

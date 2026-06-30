@@ -4,6 +4,7 @@
 
 //
 #include "service/WordCounter/WordCounter.h"
+#include "service/Tools/Tools.h"
 
 //
 // EDITOR CLASS IMPLEMENTATION
@@ -720,18 +721,26 @@ void Editor::keyboard(int key, bool pressed)
                 }
                 else
                 {
-                    // left
+                    // left - step back over a whole UTF-8 character so the
+                    // cursor never stops between the bytes of one hanzi
                     --cursorPos;
+                    while (cursorPos > 0 &&
+                           utf8_is_continuation((uint8_t)buffer[cursorPos]))
+                        --cursorPos;
                 }
             }
             else if (key == 19)
             {
                 // cursor can't move outside the last text
                 if (cursorPos < getBufferSize())
-                    ++cursorPos;
+                    // right - advance by the length of the character here
+                    cursorPos += utf8_char_len((uint8_t)buffer[cursorPos]);
                 else
                     // already at the end of the buffer - load the next page
                     pageForward();
+
+                if (cursorPos > getBufferSize())
+                    cursorPos = getBufferSize();
             }
 
             // UP
@@ -945,7 +954,8 @@ void Editor::updateScreen()
 
     //
     this->totalLine = 0;
-    int line_count = 0;
+    int line_count = 0; // BYTES on the current line (drives lineLengths / cursor)
+    int display_col = 0; // VISUAL columns on the current line (CJK counts as 2)
 
     // remember the last space position to use it for the word wrap
     int last_space_index = -1;
@@ -966,8 +976,14 @@ void Editor::updateScreen()
             break;
         }
 
-        // Count total characters in a line
+        // Count total bytes in a line
         line_count++;
+
+        // Count visual columns: a UTF-8 lead byte adds 1 (ASCII/Latin) or 2
+        // (multi-byte, i.e. CJK); continuation bytes add nothing.
+        uint8_t b = (uint8_t)buffer[i];
+        if (!utf8_is_continuation(b))
+            display_col += (utf8_char_len(b) >= 2) ? 2 : 1;
 
         // Track the position of the last space
         if (buffer[i] == ' ')
@@ -976,8 +992,11 @@ void Editor::updateScreen()
             last_space_position = line_count;
         }
 
-        // Handle words longer than `cols`
-        if (line_count == cols && last_space_index == -1)
+        // Handle words longer than `cols` (no wrap point) - but never split a
+        // multi-byte character: only break on a UTF-8 boundary.
+        bool atCharBoundary =
+            (i + 1 >= BUFFER_SIZE) || !utf8_is_continuation((uint8_t)buffer[i + 1]);
+        if (display_col >= cols && last_space_index == -1 && atCharBoundary)
         {
             // Register the line count
             lineLengths[totalLine] = line_count;
@@ -987,13 +1006,14 @@ void Editor::updateScreen()
 
             // Reset counters
             line_count = 0;
+            display_col = 0;
             last_space_index = -1;
             last_space_position = -1;
 
             continue;
         }
-        // When receiving a newline or max characters reached, start a new line
-        if (buffer[i] == '\n' || line_count == cols)
+        // When receiving a newline or max columns reached, start a new line
+        if (buffer[i] == '\n' || (display_col >= cols && atCharBoundary))
         {
             // when ENTER key is found
             if (buffer[i] == '\n')
@@ -1006,6 +1026,7 @@ void Editor::updateScreen()
 
                 // reset counters
                 line_count = 0;
+                display_col = 0;
             }
 
             // This line requires word-wrap
@@ -1019,6 +1040,15 @@ void Editor::updateScreen()
 
                 // new line count starts from the wrapped word
                 line_count -= last_space_position;
+
+                // recompute the visual width of the carried-over word
+                display_col = 0;
+                for (char *p = &buffer[last_space_index + 1]; p <= &buffer[i]; p++)
+                {
+                    uint8_t pb = (uint8_t)*p;
+                    if (!utf8_is_continuation(pb))
+                        display_col += (utf8_char_len(pb) >= 2) ? 2 : 1;
+                }
             }
 
             // This line doesn't requrie word wrap
@@ -1032,6 +1062,7 @@ void Editor::updateScreen()
 
                 //
                 line_count = 0;
+                display_col = 0;
             }
 
             // reset the word wrap flags
@@ -1090,6 +1121,12 @@ void Editor::addChar(int c)
     }
 }
 
+void Editor::addString(const char *utf8)
+{
+    for (const char *p = utf8; *p; p++)
+        addChar((uint8_t)*p);
+}
+
 void Editor::removeLastChar()
 {
     int bufferSize = getBufferSize();
@@ -1099,15 +1136,25 @@ void Editor::removeLastChar()
 
     if (bufferSize > 0 && cursorPos > 0)
     {
-        // Shift the trailing texts left by one position
+        // Delete a whole UTF-8 character: walk back over any continuation
+        // bytes so one backspace removes one hanzi rather than one byte.
+        int removeBytes = 1;
+        int from = cursorPos - 1;
+        while (from > 0 && utf8_is_continuation((uint8_t)buffer[from]))
+        {
+            --from;
+            ++removeBytes;
+        }
+
+        // Shift the trailing text left over the deleted character
         if (bufferSize > cursorPos)
         {
-            memmove(buffer + cursorPos - 1, buffer + cursorPos, bufferSize - cursorPos);
+            memmove(buffer + from, buffer + cursorPos, bufferSize - cursorPos);
         }
 
         // Null terminate the buffer
-        buffer[bufferSize - 1] = 0;
-        cursorPos -= 1;
+        buffer[bufferSize - removeBytes] = 0;
+        cursorPos = from;
 
         bufferSize = getBufferSize();
         _debug("FileBuffer::removeLastChar After cusorPos: %d bufferSize: %d\n", cursorPos, bufferSize);
@@ -1119,14 +1166,20 @@ void Editor::removeCharAtCursor()
     int bufferSize = getBufferSize();
     if (bufferSize > 0 && cursorPos < bufferSize)
     {
-        // Shift the trailing text left by one position
-        if (bufferSize > cursorPos + 1)
+        // Delete the whole UTF-8 character that starts at the cursor
+        int removeBytes = utf8_char_len((uint8_t)buffer[cursorPos]);
+        if (cursorPos + removeBytes > bufferSize)
+            removeBytes = bufferSize - cursorPos;
+
+        // Shift the trailing text left over the deleted character
+        if (bufferSize > cursorPos + removeBytes)
         {
-            memmove(buffer + cursorPos, buffer + cursorPos + 1, bufferSize - cursorPos - 1);
+            memmove(buffer + cursorPos, buffer + cursorPos + removeBytes,
+                    bufferSize - cursorPos - removeBytes);
         }
 
         // Decrease buffer size
-        --bufferSize;
+        bufferSize -= removeBytes;
 
         // Null terminate the buffer
         buffer[bufferSize] = '\0';

@@ -100,6 +100,8 @@ public:
 
     //
     void addChar(int c);
+    // Insert a UTF-8 string (e.g. a committed hanzi) at the cursor.
+    void addString(const char *utf8);
     void removeLastChar();
     void removeCharAtCursor();
     void removeLastWord();

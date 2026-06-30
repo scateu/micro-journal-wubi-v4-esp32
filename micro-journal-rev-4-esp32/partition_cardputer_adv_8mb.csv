@@ -1,0 +1,10 @@
+# M5Cardputer ADV - ESP32-S3 8 MB flash layout.
+# Larger app slots than the 4 MB Cardputer table because the firmware now
+# links the built-in Simplified-Chinese font (efontCN). SPIFFS holds journal
+# text files plus the Wubi IME dictionary (data/wubi86.bin).
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xE000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x300000,
+app1,     app,  ota_1,   0x310000, 0x300000,
+spiffs,   data, spiffs,  0x610000, 0x1F0000,
