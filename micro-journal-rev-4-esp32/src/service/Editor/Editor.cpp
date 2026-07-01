@@ -6,6 +6,10 @@
 #include "service/WordCounter/WordCounter.h"
 #include "service/Tools/Tools.h"
 
+#ifdef USE_IME
+#include "service/IME/IME.h"
+#endif
+
 //
 // EDITOR CLASS IMPLEMENTATION
 //
@@ -235,6 +239,14 @@ bool Editor::saveFile()
 
     //
     _log("Saving file %s\n", fileName.c_str());
+
+#ifdef USE_IME
+    // Release the Wubi dictionary's open file handle before we touch the SD
+    // FAT tree below (open/rename/remove). Holding a handle open on the volume
+    // during those operations froze the device mid-composition. The handle
+    // reopens lazily on the next lookup; the RAM index survives.
+    IME::getInstance().suspend();
+#endif
 
     // The buffer is a window onto [seekPos, seekPos+loadedLength) on disk.
     // Anything outside that window (before seekPos, after windowEnd) must

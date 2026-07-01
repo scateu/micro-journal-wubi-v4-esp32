@@ -22,6 +22,12 @@ public:
     bool begin();
     bool loaded() const { return _loaded; }
 
+    // Release the open dictionary file handle. MUST be called before the editor
+    // mutates the SD card's FAT tree (rename/remove during a save): holding a
+    // handle open across those operations froze the device. The handle reopens
+    // lazily on the next lookup; the RAM index/count survive so no reload cost.
+    void suspend();
+
     // Chinese input mode on/off. Toggling clears any in-progress composition.
     bool active() const { return _active; }
     void setActive(bool on);
@@ -72,9 +78,15 @@ private:
 
     // The dictionary is streamed from the SD card on demand (it is ~265 KB -
     // too large to hold in the internal heap, and we don't want to depend on
-    // PSRAM being present). The file stays open for the whole session.
+    // PSRAM being present). The file is kept open between lookups for speed but
+    // is closed around editor saves (see suspend()) and reopened lazily.
     File _file;
+    bool _open = false; // is _file currently open?
     uint32_t _count = 0;
+
+    // Reopen _file if it was closed by suspend(). Returns true when the handle
+    // is ready for reading. Cheap no-op when already open.
+    bool ensureOpen();
 
     // Byte offset of record 0 in the file: HEADER_SIZE for the old WUB1 format,
     // HEADER_SIZE + INDEX_ENTRIES*4 for WUB2 (which carries the prefix index).

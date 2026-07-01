@@ -75,10 +75,44 @@ bool IME::begin()
         }
     }
 
-    // The file stays open; records are read on demand (no large RAM buffer).
+    // The file stays open between lookups; records are read on demand (no large
+    // RAM buffer). It is closed around editor saves and reopened lazily.
+    _open = true;
     _loaded = true;
     _log("[IME] ready: %u Wubi records, %s index (streamed from SD)\n",
          (unsigned)_count, _index.empty() ? "no" : "prefix");
+    return true;
+}
+
+// Close the dictionary handle so the editor can safely mutate the SD FAT tree
+// (rename/remove) during a save. The RAM index/count are kept, so reopening is
+// just an open() - no reparse. Called from Editor::saveFile().
+void IME::suspend()
+{
+    if (_open)
+    {
+        _file.close();
+        _open = false;
+    }
+}
+
+// Lazily reopen the dictionary after suspend(). The header/index are already in
+// RAM, so this only needs to reacquire the file handle. Returns false (and
+// leaves _open false) if the reopen fails - callers then read nothing.
+bool IME::ensureOpen()
+{
+    if (_open)
+        return true;
+    if (!_loaded || !gfs())
+        return false;
+
+    _file = gfs()->open(WUBI_PATH, "r");
+    if (!_file)
+    {
+        _log("[IME] reopen of %s failed\n", WUBI_PATH);
+        return false;
+    }
+    _open = true;
     return true;
 }
 
@@ -100,6 +134,8 @@ bool IME::readFull(uint8_t *dst, size_t n)
 // Read the fixed-width fields of record `i` directly from the open file.
 bool IME::readCode(uint32_t i, char out[5])
 {
+    if (!ensureOpen())
+        return false;
     uint8_t rec[4];
     if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE))
         return false;
@@ -114,6 +150,8 @@ bool IME::readCode(uint32_t i, char out[5])
 
 bool IME::readHanzi(uint32_t i, char out[4])
 {
+    if (!ensureOpen())
+        return false;
     uint8_t rec[3];
     if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE + 4))
         return false;

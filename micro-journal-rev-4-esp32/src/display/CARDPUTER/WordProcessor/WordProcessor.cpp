@@ -156,7 +156,30 @@ void WP_render_ime()
         }
         return;
     }
+
+    // Repaint the bar ONLY when its content changes. WP_render() runs every
+    // frame, and unconditionally redrawing the strip each time was the flash:
+    // the whole bar was being wiped and rewritten ~7x/second even while the
+    // composition sat still. Build a cheap signature of what would be drawn
+    // (the typed code + the visible candidates) and bail out when it is
+    // unchanged - same change-detection pattern the status bar uses.
+    String signature = ime.composition();
+    signature += '\x1f';
+    {
+        const std::vector<String> &c = ime.candidates();
+        for (size_t i = 0; i < c.size(); i++)
+        {
+            signature += c[i];
+            signature += '\x1f';
+        }
+    }
+
+    static String signature_prev;
+    if (was_composing && signature == signature_prev)
+        return; // nothing changed since the last paint - leave the bar as-is
+
     was_composing = true;
+    signature_prev = signature;
 
     // background strip (inverted so it stands out from the document)
     M5Cardputer.Display.fillRect(0, barY, screen_width, barH, foreground_color);
