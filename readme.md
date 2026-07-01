@@ -3,6 +3,7 @@ DEMO:
 
 
 INSTALL:
+
     cd micro-journal-rev-4-esp32
     pio run -e cardputer-adv -t upload
 
