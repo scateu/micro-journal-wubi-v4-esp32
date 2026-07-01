@@ -976,14 +976,37 @@ void Editor::updateScreen()
             break;
         }
 
-        // Count total bytes in a line
-        line_count++;
-
-        // Count visual columns: a UTF-8 lead byte adds 1 (ASCII/Latin) or 2
-        // (multi-byte, i.e. CJK); continuation bytes add nothing.
         uint8_t b = (uint8_t)buffer[i];
+
+        // Visual width of the character that STARTS at this byte (lead byte):
+        // 1 col for ASCII/Latin, 2 cols for a multi-byte glyph (CJK).
+        // Continuation bytes contribute 0 and never trigger a wrap.
+        int char_cols = 0;
         if (!utf8_is_continuation(b))
-            display_col += (utf8_char_len(b) >= 2) ? 2 : 1;
+            char_cols = (utf8_char_len(b) >= 2) ? 2 : 1;
+
+        // PRE-EMPTIVE HARD WRAP:
+        // If placing this character would push the line past `cols`, and there
+        // is no earlier space to wrap on, break the line BEFORE this character.
+        // This is what stops a double-width hanzi from being drawn half-off the
+        // right edge - the old code placed the glyph first and wrapped after.
+        if (char_cols > 0 && line_count > 0 &&
+            display_col + char_cols > cols && last_space_index == -1)
+        {
+            // close the current line just before this character
+            lineLengths[totalLine] = line_count;
+            linePositions[++totalLine] = &buffer[i];
+
+            // this character becomes the first of the new line
+            line_count = 0;
+            display_col = 0;
+            last_space_index = -1;
+            last_space_position = -1;
+        }
+
+        // Count this character onto the (possibly new) current line
+        line_count++;
+        display_col += char_cols;
 
         // Track the position of the last space
         if (buffer[i] == ' ')
@@ -992,28 +1015,10 @@ void Editor::updateScreen()
             last_space_position = line_count;
         }
 
-        // Handle words longer than `cols` (no wrap point) - but never split a
-        // multi-byte character: only break on a UTF-8 boundary.
-        bool atCharBoundary =
-            (i + 1 >= BUFFER_SIZE) || !utf8_is_continuation((uint8_t)buffer[i + 1]);
-        if (display_col >= cols && last_space_index == -1 && atCharBoundary)
-        {
-            // Register the line count
-            lineLengths[totalLine] = line_count;
-
-            // Start a new line
-            linePositions[++totalLine] = &buffer[i + 1];
-
-            // Reset counters
-            line_count = 0;
-            display_col = 0;
-            last_space_index = -1;
-            last_space_position = -1;
-
-            continue;
-        }
-        // When receiving a newline or max columns reached, start a new line
-        if (buffer[i] == '\n' || (display_col >= cols && atCharBoundary))
+        // When receiving a newline or the line is full, start a new line.
+        // display_col >= cols means the line is exactly full; the pre-emptive
+        // wrap above guarantees we never exceed cols with a multi-byte glyph.
+        if (buffer[i] == '\n' || display_col >= cols)
         {
             // when ENTER key is found
             if (buffer[i] == '\n')

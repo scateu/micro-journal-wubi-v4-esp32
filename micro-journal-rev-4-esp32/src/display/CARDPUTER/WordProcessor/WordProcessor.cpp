@@ -15,15 +15,20 @@
 #include "service/IME/IME.h"
 #endif
 
-extern const uint8_t u8g2_font_profont22_tf[];
+extern const uint8_t u8g2_font_profont12_tf[];
 
 //
 int screen_width = 240;
 int screen_height = 135;
 
-//
-const int font_width = 14;
-const int font_height = 22;
+// Body font is profont12 (half of the former profont22). profont12 glyphs are
+// 6px wide / 12px tall; we advance 7px per Latin cell for a little tracking.
+const int font_width = 7;
+const int font_height = 13;
+
+// Baseline drop from the top of a cell to where drawChar expects the origin
+// (profont12 has ascent 8, descent 2).
+const int font_baseline = 10;
 
 // A CJK glyph is rendered double-width so it stays squared with the
 // monospaced Latin font used for the body text.
@@ -31,21 +36,28 @@ const int cjk_width = font_width * 2;
 
 // Lines will be rendered at the bottom on the screen
 // need to calculate the Y position considering the status bar height
-const int editY = 90;
-const int cursorY = editY + font_height - 2;
+const int editY = 96;
+const int cursorY = editY + font_height - 1;
 const int cursorHeight = 2;
 
 // Some flags
 bool clear_background = true;
+// When true, only the current edit line's strip is repainted (no full-screen
+// wipe). This is the common typing case and avoids the whole-screen flash.
+bool clear_editline = false;
 unsigned int last_sleep = millis();
 
-static const lgfx::U8g2font g_profont22(u8g2_font_profont22_tf);
+static const lgfx::U8g2font g_profont22(u8g2_font_profont12_tf);
 
 //
 void WP_setup()
 {
-    // Editor Init - setup screen size
-    Editor::getInstance().init(17, 4);
+    // Editor Init - setup screen size.
+    // cols is measured in display columns (Latin = 1 col of font_width px, a
+    // CJK glyph = 2 cols). 34 cols * 7px = 238px fits the 240px width, whether
+    // the line is 34 Latin chars or 17 hanzi. rows is how many lines fit above
+    // the edit line: editY(96) / font_height(13) ~= 7.
+    Editor::getInstance().init(34, 7);
 
     // setup default color
     JsonDocument &app = status();
@@ -125,7 +137,7 @@ void WP_render_ime()
 
     // The bar covers the edit line and the row just below it.
     const int barY = editY;
-    const int barH = font_height + cursorHeight + 2;
+    const int barH = font_height + cursorHeight + 3;
 
     if (!composing)
     {
@@ -151,21 +163,21 @@ void WP_render_ime()
     M5Cardputer.Display.drawString(code, 2, barY);
 
     // candidates: "1字 2子 3自 ..." using the Chinese font
-    int x = code.length() * font_width + 10;
+    int x = code.length() * font_width + 8;
     const std::vector<String> &cands = ime.candidates();
     for (size_t i = 0; i < cands.size(); i++)
     {
         // index digit
         M5Cardputer.Display.setFont(&g_profont22);
-        M5Cardputer.Display.drawString(String((int)i + 1), x, barY);
-        x += 9;
+        M5Cardputer.Display.drawString(String((int)i + 1), x, barY + 1);
+        x += font_width;
 
         // hanzi
-        M5Cardputer.Display.setFont(&fonts::efontCN_16);
-        M5Cardputer.Display.drawString(cands[i], x, barY + 2);
-        x += 20;
+        M5Cardputer.Display.setFont(&fonts::efontCN_12);
+        M5Cardputer.Display.drawString(cands[i], x, barY + 1);
+        x += 14;
 
-        if (x > screen_width - 20)
+        if (x > screen_width - 16)
             break;
     }
 
@@ -275,7 +287,7 @@ void WP_render_line(int line_num, int y)
         // plain ASCII - keep the existing crisp monospaced glyph
         if (clen == 1 && value < 0x80)
         {
-            M5Cardputer.Display.drawChar((char)value, x, y + font_height - 4);
+            M5Cardputer.Display.drawChar((char)value, x, y + font_baseline);
             x += font_width;
             i += 1;
             continue;
@@ -292,7 +304,7 @@ void WP_render_line(int line_num, int y)
             memcpy(glyph, line + i, clen);
             glyph[clen] = '\0';
 
-            M5Cardputer.Display.setFont(&fonts::efontCN_24);
+            M5Cardputer.Display.setFont(&fonts::efontCN_12);
             M5Cardputer.Display.drawString(glyph, x, y);
             M5Cardputer.Display.setFont(&g_profont22);
 
@@ -305,7 +317,7 @@ void WP_render_line(int line_num, int y)
         // stray high byte (e.g. legacy Latin-1 content) - best-effort
         String str = asciiToUnicode(value);
         if (str.length() == 0)
-            M5Cardputer.Display.drawChar((char)value, x, y + font_height - 4);
+            M5Cardputer.Display.drawChar((char)value, x, y + font_baseline);
         else
             M5Cardputer.Display.drawString(str, x, y);
         x += font_width;
@@ -482,57 +494,52 @@ void WP_render_clear()
     static int cursorPos_prev = 0;
     int cursorLine = Editor::getInstance().cursorLine;
     int cursorPos = Editor::getInstance().cursorPos;
-    int cursorLinePos = Editor::getInstance().cursorLinePos;
-    int cursorLineLength = Editor::getInstance().lineLengths[cursorLine];
 
     //
     static int bufferSize_prev = 0;
     int bufferSize = Editor::getInstance().getBufferSize();
 
-    // When new line clear everything
+    // start each frame assuming nothing needs erasing
+    clear_editline = false;
+
+    // A change of line (new line, word-wrap onto a new row, arrow to another
+    // row, paging) needs the whole text area redrawn.
     if (cursorLine_prev != cursorLine)
     {
-        //
         clear_background = true;
-
-        //
         cursorLine_prev = cursorLine;
     }
 
-    // When Backspace, trailing characters should be deleted
-    // if it is backspace or del key
-    if (cursorPos_prev >= cursorPos && bufferSize_prev != bufferSize)
-        clear_background = true;
-
-    if (cursorPos_prev != cursorPos)
+    // Any edit or cursor move that stays on the same line only needs that one
+    // line repainted. Repainting a single strip - instead of wiping the whole
+    // screen every keystroke - is what removes the typing flash.
+    else if (cursorPos_prev != cursorPos || bufferSize_prev != bufferSize)
     {
-        // if it is typing at the end don't flicker
-        if (cursorPos != bufferSize)
-        {
-            // if the edit line is empty then don't flicker
-            //
-            if (cursorLinePos + 1 != cursorLineLength)
-                clear_background = true;
-        }
-
-        //
-        cursorPos_prev = cursorPos;
+        clear_editline = true;
     }
 
-    if (bufferSize != bufferSize_prev)
-    {
-        bufferSize_prev = bufferSize;
-    }
+    cursorPos_prev = cursorPos;
+    bufferSize_prev = bufferSize;
 
-    // clear background
+    // FULL CLEAR
     if (clear_background)
     {
-        // when clearing background
         M5Cardputer.Display.fillRect(
             0,
             0,
             M5Cardputer.Display.width(),
             M5Cardputer.Display.height(),
+            background_color);
+    }
+    // EDIT-LINE CLEAR: wipe just the strip the edit line occupies (including
+    // the cursor underline row) so stale glyphs don't linger after a backspace.
+    else if (clear_editline)
+    {
+        M5Cardputer.Display.fillRect(
+            0,
+            editY,
+            M5Cardputer.Display.width(),
+            font_height + cursorHeight + 1,
             background_color);
     }
 }
