@@ -3,12 +3,20 @@
 Generate the on-device Wubi 86 dictionary (data/wubi86.bin) for the micro-journal
 Chinese IME.
 
-Source table: rime-wubi `wubi86.dict.yaml`
-  https://github.com/rime/rime-wubi  (lines: <hanzi>\\t<code>\\t<weight>[\\t<stem>])
+Source table: ywvim `wubi.ywvim` (五笔86), a complete full-code single-char +
+phrase table. Only the single-character candidates are used (the editor renders
+one hanzi per commit).
 
-The full table has ~6.5k single hanzi. We keep the most frequent N (default 3500,
-the "common" set) by weight, but retain every code that maps to a kept hanzi so
-short codes still work.
+  https://github.com/scateu/ywvim  (plugin/wubi.ywvim)
+
+File format (relevant part):
+
+    [Main]
+    <code> <cand1> <cand2> ...     # space separated, frequency order
+
+where <code> is 1-4 letters and each candidate may be a single hanzi or a phrase.
+This table DOES carry the standard full codes for base characters that the older
+rime table lacked, e.g. `ssss 木`, `yygy 文`.
 
 Binary format (little-endian), consumed by src/service/IME/IME.cpp:
 
@@ -19,105 +27,109 @@ Binary format (little-endian), consumed by src/service/IME/IME.cpp:
               hanzi : 3 bytes  UTF-8 (BMP CJK is always 3 bytes)
               flag  : 1 byte   reserved (0)
 
-Records are sorted by (code, descending weight) so the device can binary-search a
-code prefix and read candidates already ordered best-first.
+Within one code the records keep the source table's candidate order (best first),
+so the device can binary-search a code prefix and read candidates already ranked.
 
 Usage:
-  python3 tools/gen_wubi.py [--src wubi86.dict.yaml] [--top 3500] [--out data/wubi86.bin]
-  (downloads the source automatically if --src is omitted and not cached)
+  python3 tools/gen_wubi.py [--src /tmp/wubi.ywvim] [--top N] [--out data/wubi86.bin]
+
+--top keeps only the N most common hanzi (ranked by shortest code, then earliest
+candidate position). Default: keep every single hanzi (~21k chars, ~265 KB) so no
+character is ever missing.
 """
 import argparse
 import os
 import struct
 import sys
-import urllib.request
 
-SRC_URL = "https://raw.githubusercontent.com/rime/rime-wubi/master/wubi86.dict.yaml"
 MAGIC = b"WUB1"
-
-
-def load_rows(path):
-    rows = []
-    started = False
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not started:
-                # YAML front matter ends with a line that is just "..."
-                if line.strip() == "...":
-                    started = True
-                continue
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            text, code = parts[0], parts[1]
-            weight = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-            rows.append((text, code, weight))
-    return rows
 
 
 def is_single_hanzi(s):
     return len(s) == 1 and 0x4E00 <= ord(s) <= 0x9FFF
 
 
+def load_main(path):
+    """Yield (code, char, rank) for every single-hanzi candidate in [Main].
+
+    rank is the candidate's 0-based position under its code (frequency order).
+    """
+    in_main = False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line.startswith("["):
+                in_main = line.strip() == "[Main]"
+                continue
+            if not in_main or not line or line.startswith("#"):
+                continue
+            parts = line.split(" ")
+            code = parts[0].lower()
+            if not (code.isascii() and code.isalpha() and 1 <= len(code) <= 4):
+                continue
+            rank = 0
+            for cand in parts[1:]:
+                if not cand:
+                    continue
+                if is_single_hanzi(cand):
+                    yield code, cand, rank
+                rank += 1
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default=None, help="path to wubi86.dict.yaml")
-    ap.add_argument("--top", type=int, default=3500,
-                    help="keep the N most frequent hanzi (default 3500)")
+    ap.add_argument("--src", default="/tmp/wubi.ywvim",
+                    help="path to the ywvim wubi86 table")
+    ap.add_argument("--top", type=int, default=0,
+                    help="keep only the N most common hanzi (0 = keep all)")
     ap.add_argument("--out", default=os.path.join("data", "wubi86.bin"))
-    ap.add_argument("--cache", default=os.path.join("tools", "wubi86.dict.yaml"))
     args = ap.parse_args()
 
-    src = args.src
-    if src is None:
-        src = args.cache
-        if not os.path.exists(src):
-            print(f"downloading {SRC_URL}")
-            os.makedirs(os.path.dirname(src), exist_ok=True)
-            urllib.request.urlretrieve(SRC_URL, src)
+    if not os.path.exists(args.src):
+        sys.exit(f"source table not found: {args.src}")
 
-    rows = load_rows(src)
+    # collect records, de-duplicating (code, char)
+    seen = set()
+    records = []  # (code, char, rank)
+    for code, char, rank in load_main(args.src):
+        key = (code, char)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append((code, char, rank))
 
-    # single hanzi, alphabetic a-z codes only
-    single = [(t, c.lower(), w) for (t, c, w) in rows
-              if is_single_hanzi(t) and c.isascii() and c.isalpha() and len(c) <= 4]
+    # optional frequency filter: rank each char by its best (shortest code,
+    # then earliest candidate position) and keep the top N.
+    if args.top > 0:
+        best = {}
+        for code, char, rank in records:
+            score = (len(code), rank)  # smaller = more common
+            if char not in best or score < best[char]:
+                best[char] = score
+        kept = set(sorted(best, key=lambda c: best[c])[:args.top])
+        records = [r for r in records if r[1] in kept]
 
-    # rank hanzi by their best (max) weight, keep the top N
-    best = {}
-    for t, c, w in single:
-        if t not in best or w > best[t]:
-            best[t] = w
-    kept = set(sorted(best, key=lambda h: best[h], reverse=True)[:args.top])
-
-    entries = [(c, t, w) for (t, c, w) in single if t in kept]
-
-    # sort by code asc, then weight desc -> candidates come out best-first
-    entries.sort(key=lambda e: (e[0], -e[2]))
+    # sort by code asc; keep candidate order (rank) within a code
+    records.sort(key=lambda r: (r[0], r[2]))
 
     out = bytearray()
     out += MAGIC
-    out += struct.pack("<I", len(entries))
-    for code, hanzi, _w in entries:
+    out += struct.pack("<I", len(records))
+    for code, char, _rank in records:
         cb = code.encode("ascii")
-        if len(cb) > 4:
-            continue
-        hb = hanzi.encode("utf-8")
-        if len(hb) != 3:
-            # skip anything outside the BMP 3-byte range to keep records fixed-width
+        hb = char.encode("utf-8")
+        if len(cb) > 4 or len(hb) != 3:
             continue
         out += cb + b"\x00" * (4 - len(cb))  # code[4]
         out += hb                              # hanzi[3]
         out += b"\x00"                         # flag
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "wb") as f:
         f.write(out)
 
-    print(f"hanzi kept   : {len(kept)}")
-    print(f"records      : {len(entries)}")
+    print(f"unique hanzi : {len(set(r[1] for r in records))}")
+    print(f"records      : {len(records)}")
     print(f"output       : {args.out}  ({len(out)} bytes)")
 
 
