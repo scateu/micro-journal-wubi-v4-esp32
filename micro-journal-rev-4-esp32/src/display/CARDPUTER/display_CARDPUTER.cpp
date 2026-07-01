@@ -54,7 +54,11 @@ void display_CARDPUTER_setup()
 void display_CARDPUTER_loop()
 {
   static unsigned int last = millis();
-  if (millis() - last > 150)
+  // ~30 fps. Was 150 ms (~6.7 fps), a legacy throttle that made typed
+  // characters lag by up to 150 ms. Rendering is now incremental (only the
+  // changed edit-line strip is repainted per keystroke), so a faster refresh
+  // is cheap and there's no flicker.
+  if (millis() - last > 33)
   {
     last = millis();
 

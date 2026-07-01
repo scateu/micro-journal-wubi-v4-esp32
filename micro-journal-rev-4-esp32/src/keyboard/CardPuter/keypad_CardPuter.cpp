@@ -30,8 +30,10 @@ void keypad_cardputer_setup()
 ///
 void keypad_cardputer_loop()
 {
-    // Minimum delay between key events (in ms)
-    static const uint32_t KEY_DEBOUNCE_INTERVAL = 100;
+    // Minimum delay between key events (in ms). Was 100 ms, which capped
+    // typing at ~10 keys/s and made English feel sluggish; 40 ms (~25 keys/s)
+    // is still enough to reject switch bounce.
+    static const uint32_t KEY_DEBOUNCE_INTERVAL = 40;
 
     // Last time a key was accepted
     static uint32_t lastKeyTime = 0;
