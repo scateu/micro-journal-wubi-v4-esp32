@@ -107,7 +107,7 @@ bool keyboard_ime_filter(int key, bool pressed)
 // Map a Ctrl/Meta + letter combo to the editor control code it triggers, or 0
 // if the combo is not one of our bindings. Pure lookup, no side effects.
 //   Ctrl:  C-a Home   C-e End   C-b Left   C-f Right   C-p Up   C-n Down
-//          C-s save   C-k kill-to-EOL       C-y yank
+//          C-d Del    C-s save   C-k kill-to-EOL       C-y yank
 //   Meta:  M-f word-forward      M-b word-back         M-d kill-word-forward
 static int keyboard_combo_code(char letter, bool ctrl, bool meta)
 {
@@ -121,6 +121,7 @@ static int keyboard_combo_code(char letter, bool ctrl, bool meta)
     case 'f': return 19; // forward char (Right)
     case 'p': return 20; // previous line (Up)
     case 'n': return 21; // next line (Down)
+    case 'd': return 127; // delete char/word at cursor (Del)
     case 's': return KEY_SAVE;
     case 'k': return KEY_KILL_LINE;
     case 'y': return KEY_YANK;
