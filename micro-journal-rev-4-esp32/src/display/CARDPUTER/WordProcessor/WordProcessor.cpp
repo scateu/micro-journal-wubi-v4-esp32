@@ -310,18 +310,18 @@ void WP_render_text()
     // initiate sprite
     if (clear_background)
     {
-        // start line
         int rows = Editor::getInstance().rows;
 
-        //
-        int y = 0;
+        // Anchor the scrollback UPWARD from the edit line so the vertical gap
+        // between every row - including the last scrollback row and the edit
+        // line - is exactly font_height. (Drawing top-down from y=0 left an
+        // uneven gap, because editY is fixed while the rows step by font_height
+        // and rows*font_height rarely equals editY.)
         for (int i = cursorLine - rows; i < cursorLine; i++)
         {
-            if (i >= 0)
+            int y = editY - (cursorLine - i) * font_height;
+            if (i >= 0 && y >= 0)
                 WP_render_line(i, y);
-
-            // new line
-            y += font_height;
         }
 
         // the edit line itself
