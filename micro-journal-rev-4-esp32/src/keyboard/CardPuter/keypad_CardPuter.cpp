@@ -57,8 +57,10 @@ void keypad_cardputer_loop()
             if (status.fn)
             {
 #ifdef USE_IME
-                // FN + SPACE -> toggle Chinese (Wubi) input on/off
-                if (status.space)
+                // FN + SPACE -> toggle Chinese (Wubi) input on/off.
+                // While FN is held the library never sets status.space (it
+                // returns after the fn-layer pass), so query the raw key list.
+                if (M5Cardputer.Keyboard.isKeyPressed(' '))
                 {
                     IME &ime = IME::getInstance();
                     // only allow turning it on if the dictionary loaded
@@ -140,6 +142,18 @@ void keypad_cardputer_loop()
 
             else
             {
+#ifdef USE_IME
+                // CTRL + SPACE -> toggle Chinese (Wubi) input on/off (alternative
+                // to FN + SPACE; matches the external USB keyboard shortcut).
+                if (status.ctrl && status.space)
+                {
+                    IME &ime = IME::getInstance();
+                    if (ime.active() || ime.begin())
+                        ime.toggle();
+                    return;
+                }
+#endif
+
                 // Printable keys. The Chinese IME is applied centrally inside
                 // display_keyboard(), so here we just forward the key.
                 for (auto i : status.word)

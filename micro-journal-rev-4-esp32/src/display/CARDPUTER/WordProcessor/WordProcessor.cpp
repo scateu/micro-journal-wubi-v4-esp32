@@ -141,12 +141,17 @@ void WP_render_ime()
 
     if (!composing)
     {
-        // just stopped composing - clear the strip once and force a redraw of
-        // the text underneath
+        // Just stopped composing (candidate committed or cancelled). Clear only
+        // the bar strip and repaint the edit line underneath it - a full-screen
+        // clear here caused a visible flash on every committed hanzi.
         if (was_composing)
         {
             M5Cardputer.Display.fillRect(0, barY, screen_width, barH, background_color);
-            clear_background = true;
+
+            M5Cardputer.Display.setFont(&g_profont22);
+            M5Cardputer.Display.setTextColor(foreground_color, background_color);
+            WP_render_line(Editor::getInstance().cursorLine, editY);
+
             was_composing = false;
         }
         return;
@@ -228,12 +233,14 @@ void WP_render_text()
             // new line
             y += font_height;
         }
+
+        // the edit line itself
+        WP_render_line(cursorLine, editY);
     }
-    else
+    else if (clear_editline)
     {
-        //
-        // Bottom line will the the edit area
-        //
+        // Only the edit line changed - repaint just that line. Doing this only
+        // on an actual change (not every idle frame) stops the shimmer.
         WP_render_line(cursorLine, editY);
     }
 }
@@ -396,33 +403,81 @@ void WP_render_status()
 
     int STATUSBAR_Y = M5Cardputer.Display.height() - 18;
 
-    // file index number
-    const int font_width = 12;
-    int file_index = app["config"]["file_index"].as<int>();
+    // Only repaint each status element when its value changes (or on a full
+    // redraw). Repainting the whole bar every 150 ms frame was a flicker source.
+    static int fileIndex_prev = -1;
+    static int wordCount_prev = -1;
 
-    //
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
-    M5Cardputer.Display.setTextColor(background_color, foreground_color);
-    M5Cardputer.Display.drawString(String(file_index), 4, STATUSBAR_Y);
+    // file index number
+    int file_index = app["config"]["file_index"].as<int>();
+    if (file_index != fileIndex_prev || clear_background)
+    {
+        fileIndex_prev = file_index;
+        M5Cardputer.Display.setTextSize(1);
+        M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+        M5Cardputer.Display.setTextColor(background_color, foreground_color);
+        M5Cardputer.Display.fillRect(4, STATUSBAR_Y, 24, 16, foreground_color);
+        M5Cardputer.Display.drawString(String(file_index), 4, STATUSBAR_Y);
+    }
 
     // WORD COUNT
-    M5Cardputer.Display.setTextColor(foreground_color, background_color);
-
     int wordCount = Editor::getInstance().wordCountFile + Editor::getInstance().wordCountBuffer;
-    String wordCountFormatted = formatNumber(wordCount);
-    M5Cardputer.Display.drawString(wordCountFormatted, 30, STATUSBAR_Y);
+    if (wordCount != wordCount_prev || clear_background)
+    {
+        wordCount_prev = wordCount;
+        M5Cardputer.Display.setTextSize(1);
+        M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+        M5Cardputer.Display.setTextColor(foreground_color, background_color);
+        M5Cardputer.Display.fillRect(30, STATUSBAR_Y, 60, 16, background_color);
+        M5Cardputer.Display.drawString(formatNumber(wordCount), 30, STATUSBAR_Y);
+    }
+
+#ifdef USE_IME
+    // INPUT-MODE INDICATOR: [五] when the Wubi IME is on, [En] otherwise.
+    // Sits between the word count and the battery %. Only repainted when the
+    // mode actually changes (or on a full redraw) so it never flickers.
+    {
+        const int IME_X = 95;
+        static int ime_prev = -1;
+        int ime_now = IME::getInstance().active() ? 1 : 0;
+
+        if (ime_now != ime_prev || clear_background)
+        {
+            ime_prev = ime_now;
+
+            // clear the cell first so the previous label doesn't bleed through
+            M5Cardputer.Display.fillRect(IME_X, STATUSBAR_Y, 34, 16, background_color);
+            M5Cardputer.Display.setTextColor(foreground_color, background_color);
+
+            if (ime_now)
+            {
+                // [五] - Chinese font for the glyph, ASCII font for the brackets
+                M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+                M5Cardputer.Display.drawString("[", IME_X, STATUSBAR_Y);
+                M5Cardputer.Display.setFont(&fonts::efontCN_12);
+                M5Cardputer.Display.drawString("五", IME_X + 8, STATUSBAR_Y + 1);
+                M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+                M5Cardputer.Display.drawString("]", IME_X + 22, STATUSBAR_Y);
+            }
+            else
+            {
+                M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+                M5Cardputer.Display.drawString("[En]", IME_X, STATUSBAR_Y);
+            }
+        }
+    }
+#endif
 
     // SAVE STATUS
-    if (Editor::getInstance().saved)
+    static int saved_prev = -1;
+    int saved_now = Editor::getInstance().saved ? 1 : 0;
+    if (saved_now != saved_prev || clear_background)
     {
-        M5Cardputer.Display.fillCircle(screen_width - 15, STATUSBAR_Y + 8, 5, TFT_GREEN);
+        saved_prev = saved_now;
+        M5Cardputer.Display.fillCircle(screen_width - 15, STATUSBAR_Y + 8, 5,
+                                       saved_now ? TFT_GREEN : TFT_RED);
+        M5Cardputer.Display.drawCircle(screen_width - 15, STATUSBAR_Y + 8, 5, TFT_BLACK);
     }
-    else
-    {
-        M5Cardputer.Display.fillCircle(screen_width - 15, STATUSBAR_Y + 8, 5, TFT_RED);
-    }
-    M5Cardputer.Display.drawCircle(screen_width - 15, STATUSBAR_Y + 8, 5, TFT_BLACK);
 
     // BATTERY
     static int displayedBattery = -1;     // the value shown on screen
@@ -469,11 +524,20 @@ void WP_render_status()
         }
     }
 
-    // Draw smoothed / stabilized value
-    M5Cardputer.Display.drawString(
-        format("%d%%", displayedBattery),
-        screen_width - 85,
-        STATUSBAR_Y);
+    // Draw smoothed / stabilized value, only when it changes
+    static int battery_prev = -999;
+    if (displayedBattery != battery_prev || clear_background)
+    {
+        battery_prev = displayedBattery;
+        M5Cardputer.Display.setTextSize(1);
+        M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
+        M5Cardputer.Display.setTextColor(foreground_color, background_color);
+        M5Cardputer.Display.fillRect(screen_width - 85, STATUSBAR_Y, 40, 16, background_color);
+        M5Cardputer.Display.drawString(
+            format("%d%%", displayedBattery),
+            screen_width - 85,
+            STATUSBAR_Y);
+    }
 }
 
 //

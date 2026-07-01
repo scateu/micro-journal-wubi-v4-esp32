@@ -964,116 +964,87 @@ void Editor::updateScreen()
     //
     // BUFFER -> SPLIT IN LINES
     //
-    for (int i = 0; i < BUFFER_SIZE; i++) // Fixed loop condition
+    // Iterate one WHOLE character at a time (clen bytes). Advancing per
+    // character - never per byte - is what guarantees a multi-byte hanzi is
+    // never split across a line boundary (which used to show up as "ä\nä").
+    int i = 0;
+    while (i < BUFFER_SIZE)
     {
+        uint8_t b = (uint8_t)buffer[i];
+
         // When reaching the end of text, break
-        if (buffer[i] == '\0')
+        if (b == '\0')
         {
             // Update the length of the last line
             lineLengths[totalLine] = line_count;
-
-            //
             break;
         }
 
-        uint8_t b = (uint8_t)buffer[i];
+        // Length in bytes and visual columns of the character at `i`.
+        int clen = utf8_char_len(b);
+        if (i + clen > BUFFER_SIZE)
+            clen = 1; // guard against a truncated trailing sequence
+        int char_cols = (clen >= 2) ? 2 : 1;
 
-        // Visual width of the character that STARTS at this byte (lead byte):
-        // 1 col for ASCII/Latin, 2 cols for a multi-byte glyph (CJK).
-        // Continuation bytes contribute 0 and never trigger a wrap.
-        int char_cols = 0;
-        if (!utf8_is_continuation(b))
-            char_cols = (utf8_char_len(b) >= 2) ? 2 : 1;
-
-        // PRE-EMPTIVE HARD WRAP:
-        // If placing this character would push the line past `cols`, and there
-        // is no earlier space to wrap on, break the line BEFORE this character.
-        // This is what stops a double-width hanzi from being drawn half-off the
-        // right edge - the old code placed the glyph first and wrapped after.
-        if (char_cols > 0 && line_count > 0 &&
-            display_col + char_cols > cols && last_space_index == -1)
+        // A hard newline always breaks the line here.
+        if (b == '\n')
         {
-            // close the current line just before this character
-            lineLengths[totalLine] = line_count;
-            linePositions[++totalLine] = &buffer[i];
-
-            // this character becomes the first of the new line
+            lineLengths[totalLine] = line_count + 1; // include the '\n'
+            linePositions[++totalLine] = &buffer[i + 1];
             line_count = 0;
             display_col = 0;
             last_space_index = -1;
             last_space_position = -1;
+            i += 1;
+            continue;
         }
 
-        // Count this character onto the (possibly new) current line
-        line_count++;
-        display_col += char_cols;
-
-        // Track the position of the last space
-        if (buffer[i] == ' ')
+        // PRE-EMPTIVE WRAP: if placing this whole character would overflow the
+        // line width, break BEFORE it. Wrap at the last space when there is one
+        // (word wrap), otherwise break right here (hard wrap). Either way the
+        // break lands on a character boundary, so no glyph is ever cut.
+        if (line_count > 0 && display_col + char_cols > cols)
         {
-            last_space_index = i;
-            last_space_position = line_count;
-        }
-
-        // When receiving a newline or the line is full, start a new line.
-        // display_col >= cols means the line is exactly full; the pre-emptive
-        // wrap above guarantees we never exceed cols with a multi-byte glyph.
-        if (buffer[i] == '\n' || display_col >= cols)
-        {
-            // when ENTER key is found
-            if (buffer[i] == '\n')
+            if (last_space_index != -1)
             {
-                // register the line count
-                lineLengths[totalLine] = line_count;
-
-                // start of the new line
-                linePositions[++totalLine] = &buffer[i + 1];
-
-                // reset counters
-                line_count = 0;
-                display_col = 0;
-            }
-
-            // This line requires word-wrap
-            else if (last_space_index != -1 && buffer[i] != '\n')
-            {
-                // register the line position as the last space position
+                // word wrap: end this line at the last space
                 lineLengths[totalLine] = last_space_position;
-
-                // new line starts from just after the space
                 linePositions[++totalLine] = &buffer[last_space_index + 1];
 
-                // new line count starts from the wrapped word
+                // carry the trailing word onto the new line and recompute width
                 line_count -= last_space_position;
-
-                // recompute the visual width of the carried-over word
                 display_col = 0;
-                for (char *p = &buffer[last_space_index + 1]; p <= &buffer[i]; p++)
+                for (char *p = &buffer[last_space_index + 1]; p < &buffer[i]; p++)
                 {
                     uint8_t pb = (uint8_t)*p;
                     if (!utf8_is_continuation(pb))
                         display_col += (utf8_char_len(pb) >= 2) ? 2 : 1;
                 }
             }
-
-            // This line doesn't requrie word wrap
             else
             {
-                // register the line count
+                // hard wrap: this character starts a fresh line
                 lineLengths[totalLine] = line_count;
-
-                //
-                linePositions[++totalLine] = &buffer[i + 1];
-
-                //
+                linePositions[++totalLine] = &buffer[i];
                 line_count = 0;
                 display_col = 0;
             }
-
-            // reset the word wrap flags
             last_space_index = -1;
             last_space_position = -1;
         }
+
+        // Place the whole character on the current line
+        line_count += clen;
+        display_col += char_cols;
+
+        // Track the position of the last space for word wrapping
+        if (b == ' ')
+        {
+            last_space_index = i;
+            last_space_position = line_count;
+        }
+
+        i += clen;
     }
 
     // Handle cursor position beyond buffer

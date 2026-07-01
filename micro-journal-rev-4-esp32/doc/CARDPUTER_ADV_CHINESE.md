@@ -24,7 +24,7 @@ external USB keyboard** — they share one input pipeline.
 
 | Key | Action |
 |-----|--------|
-| **Fn + Space** (built-in) | Toggle Chinese (Wubi) input on / off (starts on) |
+| **Fn + Space** or **Ctrl + Space** (built-in) | Toggle Chinese (Wubi) input on / off (starts on) |
 | **Ctrl + Space** (USB keyboard) | Toggle Chinese (Wubi) input on / off |
 | `a`–`z` | Append to the Wubi code (max 4 letters) |
 | `1`–`9` | Pick that numbered candidate |
@@ -35,6 +35,9 @@ external USB keyboard** — they share one input pipeline.
 | **Esc** (Fn + \`) | Cancel the current composition |
 
 When no composition is in progress, all of these keys behave normally in the editor.
+
+The current input mode is shown in the status bar between the word count and the
+battery percentage: **[五]** for Wubi, **[En]** for English.
 
 ## Architecture note
 
