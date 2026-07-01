@@ -14,4 +14,5 @@ Additional Features:
  - C-space switch IME
  - C-s Save
  - Fn-0..9 switch txt file
+ - Ctrl -+ =_   increase decrease font size.
 
