@@ -17,64 +17,68 @@ bool IME::begin()
     if (!gfs())
         return false;
 
-    File f = gfs()->open(WUBI_PATH, "r");
-    if (!f)
+    _file = gfs()->open(WUBI_PATH, "r");
+    if (!_file)
     {
         _log("[IME] dictionary %s not found\n", WUBI_PATH);
         return false;
     }
 
-    size_t size = f.size();
-    if (size < 8)
+    size_t size = _file.size();
+    uint8_t header[HEADER_SIZE];
+    if (size < HEADER_SIZE || _file.read(header, HEADER_SIZE) != HEADER_SIZE ||
+        memcmp(header, WUBI_MAGIC, 4) != 0)
     {
-        _log("[IME] dictionary too small (%u bytes)\n", (unsigned)size);
-        f.close();
-        return false;
-    }
-
-    uint8_t header[8];
-    if (f.read(header, 8) != 8 || memcmp(header, WUBI_MAGIC, 4) != 0)
-    {
-        _log("[IME] bad dictionary magic\n");
-        f.close();
+        _log("[IME] bad/short dictionary header (%u bytes)\n", (unsigned)size);
+        _file.close();
         return false;
     }
 
     _count = (uint32_t)header[4] | ((uint32_t)header[5] << 8) |
              ((uint32_t)header[6] << 16) | ((uint32_t)header[7] << 24);
 
-    size_t bytes = (size_t)_count * RECORD_SIZE;
-    if (8 + bytes > size)
+    // sanity check the declared size against the actual file
+    size_t need = (size_t)HEADER_SIZE + (size_t)_count * RECORD_SIZE;
+    if (_count == 0 || need > size)
     {
-        _log("[IME] dictionary truncated: need %u, have %u\n",
-             (unsigned)(8 + bytes), (unsigned)size);
-        f.close();
+        _log("[IME] dictionary size mismatch: need %u, have %u\n",
+             (unsigned)need, (unsigned)size);
+        _file.close();
         return false;
     }
 
-    // Prefer PSRAM for the table; fall back to regular heap if unavailable.
-    _data = (uint8_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-    if (!_data)
-        _data = (uint8_t *)malloc(bytes);
-    if (!_data)
-    {
-        _log("[IME] out of memory for %u records\n", (unsigned)_count);
-        f.close();
-        return false;
-    }
-
-    size_t got = f.read(_data, bytes);
-    f.close();
-    if (got != bytes)
-    {
-        _log("[IME] short read %u/%u\n", (unsigned)got, (unsigned)bytes);
-        free(_data);
-        _data = nullptr;
-        return false;
-    }
-
+    // The file stays open; records are read on demand (no large RAM buffer).
     _loaded = true;
-    _log("[IME] loaded %u Wubi records\n", (unsigned)_count);
+    _log("[IME] ready: %u Wubi records (streamed from SD)\n", (unsigned)_count);
+    return true;
+}
+
+// Read the fixed-width fields of record `i` directly from the open file.
+bool IME::readCode(uint32_t i, char out[5])
+{
+    uint8_t rec[4];
+    if (!_file.seek(HEADER_SIZE + (size_t)i * RECORD_SIZE))
+        return false;
+    if (_file.read(rec, 4) != 4)
+        return false;
+    int n = 0;
+    for (; n < 4 && rec[n]; n++)
+        out[n] = (char)rec[n];
+    out[n] = '\0';
+    return true;
+}
+
+bool IME::readHanzi(uint32_t i, char out[4])
+{
+    uint8_t rec[3];
+    if (!_file.seek(HEADER_SIZE + (size_t)i * RECORD_SIZE + 4))
+        return false;
+    if (_file.read(rec, 3) != 3)
+        return false;
+    out[0] = (char)rec[0];
+    out[1] = (char)rec[1];
+    out[2] = (char)rec[2];
+    out[3] = '\0';
     return true;
 }
 
@@ -90,16 +94,6 @@ void IME::reset()
     _all.clear();
     _page.clear();
     _pageStart = 0;
-}
-
-// Read the 4-byte code of record `i` into a comparable C string.
-static void record_code(const uint8_t *data, uint32_t i, char out[5])
-{
-    const uint8_t *rec = data + (size_t)i * 8;
-    int n = 0;
-    for (; n < 4 && rec[n]; n++)
-        out[n] = (char)rec[n];
-    out[n] = '\0';
 }
 
 void IME::lookup()
@@ -122,7 +116,8 @@ void IME::lookup()
     {
         uint32_t mid = lo + (hi - lo) / 2;
         char code[5];
-        record_code(_data, mid, code);
+        if (!readCode(mid, code))
+            break;
         if (strncmp(code, q, qlen) < 0)
             lo = mid + 1;
         else
@@ -130,16 +125,18 @@ void IME::lookup()
     }
 
     // Walk forward collecting every record whose code starts with the prefix,
-    // de-duplicating hanzi (the table can list the same char at several weights).
+    // de-duplicating hanzi (the table can list the same char under several codes).
     for (uint32_t i = lo; i < _count; i++)
     {
         char code[5];
-        record_code(_data, i, code);
+        if (!readCode(i, code))
+            break;
         if (strncmp(code, q, qlen) != 0)
             break;
 
-        const uint8_t *rec = _data + (size_t)i * 8;
-        char hz[4] = {(char)rec[4], (char)rec[5], (char)rec[6], '\0'};
+        char hz[4];
+        if (!readHanzi(i, hz))
+            break;
         String h(hz);
 
         bool dup = false;

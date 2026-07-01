@@ -2,6 +2,7 @@
 
 //
 #include <Arduino.h>
+#include <FS.h>
 #include <vector>
 
 //
@@ -56,12 +57,22 @@ private:
 
     // dictionary record: fixed 8 bytes on disk (code[4] + hanzi[3] + flag[1])
     static const int RECORD_SIZE = 8;
+    static const int HEADER_SIZE = 8; // magic[4] + count[4]
 
     bool _loaded = false;
     bool _active = false;
 
-    uint8_t *_data = nullptr; // raw record block (count * RECORD_SIZE), in PSRAM
+    // The dictionary is streamed from the SD card on demand (it is ~265 KB -
+    // too large to hold in the internal heap, and we don't want to depend on
+    // PSRAM being present). The file stays open for the whole session.
+    File _file;
     uint32_t _count = 0;
+
+    // Read the 4-byte code of record `i` into `out` (NUL-terminated). Returns
+    // false on an I/O error.
+    bool readCode(uint32_t i, char out[5]);
+    // Read the 3-byte UTF-8 hanzi of record `i` into `out` (NUL-terminated).
+    bool readHanzi(uint32_t i, char out[4]);
 
     String _code;                   // typed Wubi letters
     std::vector<String> _all;       // all candidates for the current code

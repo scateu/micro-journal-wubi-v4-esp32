@@ -77,8 +77,10 @@ reports the dictionary as unavailable).
 - **Rendering** — `WP_render_line()` walks each line as UTF-8: ASCII draws with the
   monospaced Latin font; a multi-byte run draws one `efontCN_12` glyph at double
   width.
-- **IME** — `src/service/IME/` loads `wubi86.bin` into PSRAM and binary-searches the
-  typed code prefix to produce an ordered candidate list.
+- **IME** — `src/service/IME/` keeps `wubi86.bin` open on the SD card and
+  binary-searches it (seek + read per probe) to produce an ordered candidate list.
+  The table (~265 KB) is streamed, not loaded into RAM, because the Cardputer build
+  has no PSRAM enabled and it would not fit the internal heap.
 
 ## Dictionary source / licensing
 
