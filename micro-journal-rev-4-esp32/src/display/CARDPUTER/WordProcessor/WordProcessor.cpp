@@ -642,6 +642,15 @@ void WP_keyboard(int key, bool pressed, int index)
     JsonDocument &app = status();
     _debug("WP_keyboard key: %d, pressed: %d\n", key, pressed);
 
+    // C-s: save in place without leaving the editor (unlike ESC, which saves
+    // and opens the menu). Handle it here so it never reaches the editor buffer.
+    if (key == KEY_SAVE)
+    {
+        if (!pressed)
+            Editor::getInstance().saveFile();
+        return;
+    }
+
     if (key == 27 || key == 6)
     {
         if (!pressed)

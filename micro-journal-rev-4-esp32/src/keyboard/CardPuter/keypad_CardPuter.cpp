@@ -154,6 +154,22 @@ void keypad_cardputer_loop()
                 }
 #endif
 
+                // Emacs / readline shortcuts: Ctrl+<letter> and Meta+<letter>
+                // (Meta = Alt or Opt). Detect these before the plain-key path
+                // so the modified letter isn't also typed into the document.
+                bool meta = status.alt || status.opt;
+                if ((status.ctrl || meta) && !status.word.empty())
+                {
+                    // With Ctrl/Shift held the library reports the shifted char
+                    // (e.g. 'A'); normalise to lower case for the mapping.
+                    char letter = status.word[0];
+                    if (letter >= 'A' && letter <= 'Z')
+                        letter = letter - 'A' + 'a';
+
+                    if (keyboard_editor_combo(letter, status.ctrl, meta))
+                        return;
+                }
+
                 // Printable keys. The Chinese IME is applied centrally inside
                 // display_keyboard(), so here we just forward the key.
                 for (auto i : status.word)

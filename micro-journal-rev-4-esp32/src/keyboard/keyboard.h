@@ -15,6 +15,18 @@ void keyboard_capslock_toggle();
 // When USE_IME is not defined this always returns false.
 bool keyboard_ime_filter(int key, bool pressed);
 
+// Emacs / readline shortcut gateway shared by every keyboard driver (internal
+// Cardputer matrix and external USB host). Maps a Ctrl+<letter> or
+// Meta(Alt|Opt)+<letter> combo to an editor action and dispatches it through
+// display_keyboard(). `letter` must be lower case. Returns true when the combo
+// was one of our bindings (and has been handled - caller must not also forward
+// the plain key).
+bool keyboard_editor_combo(char letter, bool ctrl, bool meta);
+
+// Predicate form: true when the combo maps to a binding, without dispatching.
+// Used to swallow the key-release edge on the external USB keyboard.
+bool keyboard_editor_combo_bound(char letter, bool ctrl, bool meta);
+
 //
 void keyboard_config_load(
     String filename,

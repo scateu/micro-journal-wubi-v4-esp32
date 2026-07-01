@@ -659,6 +659,12 @@ void Editor::keyboard(int key, bool pressed)
     // below is only for when the key is pressed
     if (pressed)
     {
+        // Any key other than a kill (C-k / M-d) breaks a run of kills, so the
+        // NEXT kill starts a fresh kill buffer instead of appending. The kill
+        // handlers re-set this to true when they run later in this call.
+        if (key != KEY_KILL_LINE && key != KEY_KILL_WORD_FWD)
+            lastActionWasKill = false;
+
         //////////////////////////
         // BACKWARD EDITING
         //////////////////////////
@@ -713,6 +719,25 @@ void Editor::keyboard(int key, bool pressed)
                 // Load previous contents from the file if at the beginning of the buffer
                 _log("Delete word reached the beginning of the buffer\n");
             }
+        }
+
+        //////////////////////////
+        // EMACS / READLINE EDITING
+        //////////////////////////
+        else if (key == KEY_WORD_FWD || key == KEY_WORD_BACK ||
+                 key == KEY_KILL_WORD_FWD || key == KEY_YANK ||
+                 key == KEY_KILL_LINE)
+        {
+            if (key == KEY_WORD_FWD)
+                moveWordForward();
+            else if (key == KEY_WORD_BACK)
+                moveWordBackward();
+            else if (key == KEY_KILL_LINE)
+                killToEndOfLine();
+            else if (key == KEY_KILL_WORD_FWD)
+                killWordForward();
+            else if (key == KEY_YANK)
+                yank();
         }
 
         //////////////////////////
@@ -1206,4 +1231,144 @@ void Editor::removeLastWord()
 
     //
     _debug("FileBuffer::removeLastWord %d\n", cursorPos);
+}
+
+//
+// Emacs / readline editing helpers
+//
+
+// A "word" is a run of alphanumeric ASCII or any multi-byte (>= 0x80) byte, so
+// hanzi count as word characters. Everything else (space, punctuation, newline)
+// is a separator.
+static bool editor_is_word_byte(uint8_t b)
+{
+    if (b >= 0x80)
+        return true; // any UTF-8 lead/continuation byte -> part of a word
+    return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') ||
+           (b >= 'a' && b <= 'z');
+}
+
+// Delete `count` bytes starting at `start`, shifting the tail left. Does not
+// move the cursor. Safe against overrun.
+static void editor_delete_bytes(char *buffer, int start, int count, int bufferSize)
+{
+    if (count <= 0 || start < 0 || start >= bufferSize)
+        return;
+    if (start + count > bufferSize)
+        count = bufferSize - start;
+    memmove(buffer + start, buffer + start + count, bufferSize - start - count);
+    buffer[bufferSize - count] = '\0';
+}
+
+void Editor::moveWordForward()
+{
+    int size = getBufferSize();
+    int p = cursorPos;
+    // skip separators, then skip the word
+    while (p < size && !editor_is_word_byte((uint8_t)buffer[p]))
+        p++;
+    while (p < size && editor_is_word_byte((uint8_t)buffer[p]))
+        p++;
+    cursorPos = p;
+    lastActionWasKill = false;
+}
+
+void Editor::moveWordBackward()
+{
+    int p = cursorPos;
+    // step back over separators, then over the word
+    while (p > 0 && !editor_is_word_byte((uint8_t)buffer[p - 1]))
+        p--;
+    while (p > 0 && editor_is_word_byte((uint8_t)buffer[p - 1]))
+        p--;
+    cursorPos = p;
+    lastActionWasKill = false;
+}
+
+void Editor::killToEndOfLine()
+{
+    int size = getBufferSize();
+    if (cursorPos >= size)
+    {
+        lastActionWasKill = false;
+        return;
+    }
+
+    // find the end of the current line (the next '\n', or end of buffer)
+    int eol = cursorPos;
+    while (eol < size && buffer[eol] != '\n')
+        eol++;
+
+    String killed;
+    if (eol > cursorPos)
+    {
+        // kill the text up to (not including) the newline
+        killed.reserve(eol - cursorPos + 1);
+        for (int i = cursorPos; i < eol; i++)
+            killed += buffer[i];
+        editor_delete_bytes(buffer, cursorPos, eol - cursorPos, size);
+    }
+    else
+    {
+        // already at end of line: kill the newline itself (join next line up)
+        killed += '\n';
+        editor_delete_bytes(buffer, cursorPos, 1, size);
+    }
+
+    // consecutive C-k presses accumulate into the kill buffer (Emacs behavior)
+    if (lastActionWasKill)
+        killBuffer += killed;
+    else
+        killBuffer = killed;
+
+    lastActionWasKill = true;
+    this->saved = false;
+}
+
+void Editor::killWordForward()
+{
+    int size = getBufferSize();
+    int p = cursorPos;
+    while (p < size && !editor_is_word_byte((uint8_t)buffer[p]))
+        p++;
+    while (p < size && editor_is_word_byte((uint8_t)buffer[p]))
+        p++;
+
+    int count = p - cursorPos;
+    if (count <= 0)
+    {
+        lastActionWasKill = false;
+        return;
+    }
+
+    String killed;
+    killed.reserve(count + 1);
+    for (int i = cursorPos; i < p; i++)
+        killed += buffer[i];
+    editor_delete_bytes(buffer, cursorPos, count, size);
+
+    if (lastActionWasKill)
+        killBuffer += killed;
+    else
+        killBuffer = killed;
+
+    lastActionWasKill = true;
+    this->saved = false;
+}
+
+void Editor::yank()
+{
+    lastActionWasKill = false;
+    if (killBuffer.length() == 0)
+        return;
+
+    // reuse the normal insertion path so buffer-full windowing still applies
+    if (getBufferSize() + (int)killBuffer.length() >= BUFFER_SIZE)
+    {
+        _log("Text buffer full - yank skipped\n");
+        return;
+    }
+
+    addString(killBuffer.c_str());
+    this->saved = false;
 }

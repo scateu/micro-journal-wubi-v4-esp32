@@ -104,6 +104,57 @@ bool keyboard_ime_filter(int key, bool pressed)
 #endif
 }
 
+// Map a Ctrl/Meta + letter combo to the editor control code it triggers, or 0
+// if the combo is not one of our bindings. Pure lookup, no side effects.
+//   Ctrl:  C-a Home   C-e End   C-b Left   C-f Right   C-p Up   C-n Down
+//          C-s save   C-k kill-to-EOL       C-y yank
+//   Meta:  M-f word-forward      M-b word-back         M-d kill-word-forward
+static int keyboard_combo_code(char letter, bool ctrl, bool meta)
+{
+  if (ctrl)
+  {
+    switch (letter)
+    {
+    case 'a': return 2;  // beginning of line (Home)
+    case 'e': return 3;  // end of line (End)
+    case 'b': return 18; // backward char (Left)
+    case 'f': return 19; // forward char (Right)
+    case 'p': return 20; // previous line (Up)
+    case 'n': return 21; // next line (Down)
+    case 's': return KEY_SAVE;
+    case 'k': return KEY_KILL_LINE;
+    case 'y': return KEY_YANK;
+    }
+  }
+  else if (meta)
+  {
+    switch (letter)
+    {
+    case 'f': return KEY_WORD_FWD;
+    case 'b': return KEY_WORD_BACK;
+    case 'd': return KEY_KILL_WORD_FWD;
+    }
+  }
+  return 0;
+}
+
+// Is this combo one of our bindings? (used to swallow the release edge)
+bool keyboard_editor_combo_bound(char letter, bool ctrl, bool meta)
+{
+  return keyboard_combo_code(letter, ctrl, meta) != 0;
+}
+
+// Dispatch the combo as a press+release pair. Returns true when handled.
+bool keyboard_editor_combo(char letter, bool ctrl, bool meta)
+{
+  int code = keyboard_combo_code(letter, ctrl, meta);
+  if (code == 0)
+    return false;
+  display_keyboard(code, true, code);
+  display_keyboard(code, false, code);
+  return true;
+}
+
 //
 void keyboard_setup()
 {
@@ -517,12 +568,14 @@ void keyboard_HID2Ascii(uint8_t keycode, uint8_t modifier, bool pressed)
     return;
   }
 
+  // Ctrl is modifier bit 0 (left) or bit 4 (right).
+  bool ctrl = (modifier & (1UL << 0)) || (modifier & (1UL << 4));
+
 #ifdef USE_IME
   //////////////////////////////////////////
   // CTRL + SPACE toggles the Chinese (Wubi) IME on an external USB keyboard
   // (the equivalent of FN + SPACE on the built-in keyboard).
-  // 0x2C - HID_KEY_SPACE; Ctrl is modifier bit 0 (left) or bit 4 (right).
-  bool ctrl = (modifier & (1UL << 0)) || (modifier & (1UL << 4));
+  // 0x2C - HID_KEY_SPACE.
   if (keycode == 0x2C && ctrl)
   {
     if (pressed)
@@ -560,6 +613,25 @@ void keyboard_HID2Ascii(uint8_t keycode, uint8_t modifier, bool pressed)
 
   // Check ALT key pressed
   bool alt = (modifier & (1UL << (2))) || (modifier & (1UL << (6)));
+
+  // Emacs / readline shortcuts: Ctrl+<letter> / Alt+<letter>. HID letter
+  // keycodes are 0x04('a')..0x1D('z'); derive the lower-case letter directly so
+  // the combo mapping matches the built-in keyboard. keyboard_editor_combo()
+  // emits its own press+release, so we only invoke it on the press edge and
+  // swallow the matching release so the plain letter is never forwarded.
+  if ((ctrl || alt) && keycode >= 0x04 && keycode <= 0x1D)
+  {
+    char letter = (char)('a' + (keycode - 0x04));
+    if (pressed)
+    {
+      if (keyboard_editor_combo(letter, ctrl, alt))
+        return;
+    }
+    else if (keyboard_editor_combo_bound(letter, ctrl, alt))
+    {
+      return; // consume the release of a combo we handled on press
+    }
+  }
 
   // Translate the Keycode to ASCII
   JsonDocument &app = status();

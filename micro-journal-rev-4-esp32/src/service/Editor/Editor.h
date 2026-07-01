@@ -106,6 +106,27 @@ public:
     void removeCharAtCursor();
     void removeLastWord();
 
+    // Emacs / readline style editing. Word motions treat a run of
+    // alphanumeric bytes as a word (whitespace/punctuation are separators),
+    // and step over whole UTF-8 characters so a hanzi is never split.
+    void moveWordForward();
+    void moveWordBackward();
+    // C-k: delete from the cursor to the end of the visual line into the kill
+    // buffer; at end-of-line delete the newline (join with the next line).
+    void killToEndOfLine();
+    // M-d: delete the word in front of the cursor into the kill buffer.
+    void killWordForward();
+    // C-y: insert the kill buffer's contents at the cursor.
+    void yank();
+
+private:
+    // Single kill buffer for C-k / M-d / C-y. Consecutive kills append so a
+    // run of C-k accumulates the whole region, matching Emacs.
+    String killBuffer;
+    bool lastActionWasKill = false;
+
+public:
+
     //
     void updateScreen();
 
