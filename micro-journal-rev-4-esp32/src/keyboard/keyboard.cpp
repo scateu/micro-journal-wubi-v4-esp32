@@ -124,6 +124,12 @@ static int keyboard_combo_code(char letter, bool ctrl, bool meta)
     case 's': return KEY_SAVE;
     case 'k': return KEY_KILL_LINE;
     case 'y': return KEY_YANK;
+    // font size: accept both the plain and shifted forms of the -/= keys so
+    // Ctrl-'-' and Ctrl-'+'/Ctrl-'=' all work without caring about Shift.
+    case '=':
+    case '+': return KEY_FONT_INC;
+    case '-':
+    case '_': return KEY_FONT_DEC;
     }
   }
   else if (meta)
@@ -614,22 +620,33 @@ void keyboard_HID2Ascii(uint8_t keycode, uint8_t modifier, bool pressed)
   // Check ALT key pressed
   bool alt = (modifier & (1UL << (2))) || (modifier & (1UL << (6)));
 
-  // Emacs / readline shortcuts: Ctrl+<letter> / Alt+<letter>. HID letter
-  // keycodes are 0x04('a')..0x1D('z'); derive the lower-case letter directly so
-  // the combo mapping matches the built-in keyboard. keyboard_editor_combo()
-  // emits its own press+release, so we only invoke it on the press edge and
-  // swallow the matching release so the plain letter is never forwarded.
-  if ((ctrl || alt) && keycode >= 0x04 && keycode <= 0x1D)
+  // Emacs / readline shortcuts + font size: Ctrl/Alt + <key>. Map the HID
+  // keycode to the combo char the shared mapping expects:
+  //   0x04..0x1D -> 'a'..'z'   0x2D -> '-' (Ctrl-'-')   0x2E -> '=' (Ctrl-'=')
+  // keyboard_editor_combo() emits its own press+release, so we dispatch on the
+  // press edge only and swallow the matching release so the plain key is never
+  // forwarded.
+  if (ctrl || alt)
   {
-    char letter = (char)('a' + (keycode - 0x04));
-    if (pressed)
+    char combo = 0;
+    if (keycode >= 0x04 && keycode <= 0x1D)
+      combo = (char)('a' + (keycode - 0x04));
+    else if (keycode == 0x2D)
+      combo = '-';
+    else if (keycode == 0x2E)
+      combo = '=';
+
+    if (combo != 0)
     {
-      if (keyboard_editor_combo(letter, ctrl, alt))
-        return;
-    }
-    else if (keyboard_editor_combo_bound(letter, ctrl, alt))
-    {
-      return; // consume the release of a combo we handled on press
+      if (pressed)
+      {
+        if (keyboard_editor_combo(combo, ctrl, alt))
+          return;
+      }
+      else if (keyboard_editor_combo_bound(combo, ctrl, alt))
+      {
+        return; // consume the release of a combo we handled on press
+      }
     }
   }
 

@@ -15,29 +15,61 @@
 #include "service/IME/IME.h"
 #endif
 
+extern const uint8_t u8g2_font_profont10_tf[];
 extern const uint8_t u8g2_font_profont12_tf[];
+extern const uint8_t u8g2_font_profont17_tf[];
 
 //
 int screen_width = 240;
 int screen_height = 135;
 
-// Body font is profont12 (half of the former profont22). profont12 glyphs are
-// 6px wide / 12px tall; we advance 7px per Latin cell for a little tracking.
-const int font_width = 7;
-const int font_height = 13;
+//
+// FONT SIZE LEVELS (Ctrl-'+' / Ctrl-'-' cycle through these).
+//
+// Each level pairs a monospaced Latin font (profont) with a matching CJK
+// bitmap font (efontCN), plus the coupled cell metrics. A CJK glyph is drawn
+// double-width (cjk_width = 2*font_width) so it stays squared with the Latin
+// grid. Metrics follow the original profont12 pattern: font_width = glyph_w+1
+// (tracking), font_height = glyph_h+1 (leading), font_baseline = glyph_h -
+// |descent| (the drawChar origin drop). See tools notes / layout memory.
+//
+struct FontLevel
+{
+    const uint8_t *latin;      // u8g2 profont
+    const lgfx::IFont *cjk;    // M5GFX built-in CJK bitmap font
+    int width;                 // Latin advance per cell (px)
+    int height;                // line pitch (px)
+    int baseline;              // drawChar origin drop (px)
+};
 
-// Baseline drop from the top of a cell to where drawChar expects the origin
-// (profont12 has ascent 8, descent 2).
-const int font_baseline = 10;
+static const FontLevel FONT_LEVELS[] = {
+    // profont10: glyph 5x10, descent 2  -> w6 h11 base8
+    {u8g2_font_profont10_tf, &fonts::efontCN_10, 6, 11, 8},
+    // profont12: glyph 6x12, descent 2  -> w7 h13 base10  (default, original)
+    {u8g2_font_profont12_tf, &fonts::efontCN_12, 7, 13, 10},
+    // profont17: glyph 9x17, descent 3  -> w10 h18 base14
+    {u8g2_font_profont17_tf, &fonts::efontCN_16, 10, 18, 14},
+};
+static const int FONT_LEVEL_COUNT = sizeof(FONT_LEVELS) / sizeof(FONT_LEVELS[0]);
+static const int FONT_LEVEL_DEFAULT = 1; // profont12 - the current look
 
-// A CJK glyph is rendered double-width so it stays squared with the
-// monospaced Latin font used for the body text.
-const int cjk_width = font_width * 2;
+// Active level and the metrics derived from it. These used to be compile-time
+// consts; they are now set by WP_set_font_size() and read all over this file.
+static int font_level = FONT_LEVEL_DEFAULT;
+int font_width = 7;
+int font_height = 13;
+int font_baseline = 10;
+int cjk_width = 14;
+
+// The active fonts. g_profont keeps its old name (churn); it now points at the
+// level's Latin font and is re-seated whenever the size changes.
+static lgfx::U8g2font g_profont22(u8g2_font_profont12_tf);
+static const lgfx::IFont *g_cjkFont = &fonts::efontCN_12;
 
 // Lines will be rendered at the bottom on the screen
 // need to calculate the Y position considering the status bar height
 const int editY = 96;
-const int cursorY = editY + font_height - 1;
+int cursorY = editY + font_height - 1;
 const int cursorHeight = 2;
 
 // Some flags
@@ -47,17 +79,52 @@ bool clear_background = true;
 bool clear_editline = false;
 unsigned int last_sleep = millis();
 
-static const lgfx::U8g2font g_profont22(u8g2_font_profont12_tf);
+// Apply font-size `level`, recompute the coupled metrics + editor grid, and
+// force a full redraw. Called at setup and by the Ctrl-'+' / Ctrl-'-' bindings.
+void WP_set_font_size(int level)
+{
+    if (level < 0)
+        level = 0;
+    if (level >= FONT_LEVEL_COUNT)
+        level = FONT_LEVEL_COUNT - 1;
+
+    font_level = level;
+    const FontLevel &f = FONT_LEVELS[level];
+
+    font_width = f.width;
+    font_height = f.height;
+    font_baseline = f.baseline;
+    cjk_width = f.width * 2;
+    cursorY = editY + font_height - 1;
+
+    g_profont22 = lgfx::U8g2font(f.latin);
+    g_cjkFont = f.cjk;
+
+    // cols = display columns that fit the 240px width (Latin = 1 col of
+    // font_width; a hanzi = 2 cols). rows = text lines above the edit line
+    // (editY / font_height). Set the grid directly and re-wrap - NOT via
+    // Editor::init(), which calls resetBuffer() and would erase the open
+    // document when the size is changed mid-editing.
+    int cols = screen_width / font_width;
+    int rows = editY / font_height;
+    if (rows < 1)
+        rows = 1;
+    Editor::getInstance().cols = cols;
+    Editor::getInstance().rows = rows;
+    Editor::getInstance().updateScreen();
+
+    // full repaint at the new size
+    clear_background = true;
+}
 
 //
 void WP_setup()
 {
-    // Editor Init - setup screen size.
-    // cols is measured in display columns (Latin = 1 col of font_width px, a
-    // CJK glyph = 2 cols). 34 cols * 7px = 238px fits the 240px width, whether
-    // the line is 34 Latin chars or 17 hanzi. rows is how many lines fit above
-    // the edit line: editY(96) / font_height(13) ~= 7.
-    Editor::getInstance().init(34, 7);
+    // Editor Init - setup screen size at the default font level. cols/rows are
+    // derived from the level's metrics (see WP_set_font_size): at profont12
+    // this is cols = 240/7 = 34, rows = 96/13 = 7 (the original grid). Font
+    // size resets to the default on each entry to the word processor.
+    WP_set_font_size(FONT_LEVEL_DEFAULT);
 
     // setup default color
     JsonDocument &app = status();
@@ -201,9 +268,9 @@ void WP_render_ime()
         x += font_width;
 
         // hanzi
-        M5Cardputer.Display.setFont(&fonts::efontCN_12);
+        M5Cardputer.Display.setFont(g_cjkFont);
         M5Cardputer.Display.drawString(cands[i], x, barY + 1);
-        x += 14;
+        x += cjk_width;
 
         if (x > screen_width - 16)
             break;
@@ -334,7 +401,7 @@ void WP_render_line(int line_num, int y)
             memcpy(glyph, line + i, clen);
             glyph[clen] = '\0';
 
-            M5Cardputer.Display.setFont(&fonts::efontCN_12);
+            M5Cardputer.Display.setFont(g_cjkFont);
             M5Cardputer.Display.drawString(glyph, x, y);
             M5Cardputer.Display.setFont(&g_profont22);
 
@@ -648,6 +715,15 @@ void WP_keyboard(int key, bool pressed, int index)
     {
         if (!pressed)
             Editor::getInstance().saveFile();
+        return;
+    }
+
+    // Ctrl-'+' / Ctrl-'-': grow / shrink the body font by one level. Handled
+    // here (not in the editor) so it re-lays-out and repaints immediately.
+    if (key == KEY_FONT_INC || key == KEY_FONT_DEC)
+    {
+        if (!pressed)
+            WP_set_font_size(font_level + (key == KEY_FONT_INC ? 1 : -1));
         return;
     }
 

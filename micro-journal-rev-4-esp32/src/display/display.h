@@ -50,6 +50,9 @@
 #define KEY_KILL_WORD_FWD 0x10 // M-d : kill word forward (into kill buffer)
 #define KEY_YANK 0x11          // C-y : yank (paste kill buffer)
 #define KEY_KILL_LINE 0x0B     // C-k : kill to end of line (into kill buffer)
+// NOTE: 0x12/0x13 (18/19) are Left/Right arrows - do NOT reuse them here.
+#define KEY_FONT_INC 0x18      // C-'+' : increase font size
+#define KEY_FONT_DEC 0x19      // C-'-' : decrease font size
 
 //
 void display_setup();

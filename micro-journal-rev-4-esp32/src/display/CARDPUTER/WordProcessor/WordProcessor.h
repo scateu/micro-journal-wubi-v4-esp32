@@ -5,6 +5,10 @@
 //
 void WP_setup();
 
+// Set the body font size level (clamped). Recomputes the editor grid + metrics
+// and forces a full redraw. Bound to Ctrl-'+' / Ctrl-'-'.
+void WP_set_font_size(int level);
+
 // 
 void WP_render();
 
