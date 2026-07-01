@@ -10,11 +10,78 @@ static const char *WUBI_PATH = "/wubi86.bin";
 static const uint8_t WUBI_MAGIC_V1[4] = {'W', 'U', 'B', '1'}; // no prefix index
 static const uint8_t WUBI_MAGIC_V2[4] = {'W', 'U', 'B', '2'}; // + prefix index
 
+#ifdef WUBI_EMBEDDED
+// The dictionary compiled into flash by board_build.embed_files = data/wubi86.bin.
+// objcopy derives the symbol name from the source PATH (non-idents -> '_'), so
+// "data/wubi86.bin" becomes _binary_data_wubi86_bin_{start,end}.
+extern const uint8_t _binary_data_wubi86_bin_start[];
+extern const uint8_t _binary_data_wubi86_bin_end[];
+#define WUBI_BLOB_START _binary_data_wubi86_bin_start
+#define WUBI_BLOB_END _binary_data_wubi86_bin_end
+#endif
+
+// Parse the WUB1/WUB2 header + prefix index from the first bytes of the
+// dictionary (already in `hdrIndex`, which must hold at least the header plus,
+// for WUB2, the whole index). Fills _count, _recordBase and _index. Returns
+// false on a bad magic / size mismatch. `total` is the whole dictionary size.
+bool IME::parseHeader(const uint8_t *hdrIndex, size_t total)
+{
+    bool v2 = memcmp(hdrIndex, WUBI_MAGIC_V2, 4) == 0;
+    if (!v2 && memcmp(hdrIndex, WUBI_MAGIC_V1, 4) != 0)
+    {
+        _log("[IME] bad dictionary magic\n");
+        return false;
+    }
+
+    _count = (uint32_t)hdrIndex[4] | ((uint32_t)hdrIndex[5] << 8) |
+             ((uint32_t)hdrIndex[6] << 16) | ((uint32_t)hdrIndex[7] << 24);
+
+    // WUB2 stores the prefix index between the header and the records.
+    _recordBase = HEADER_SIZE + (v2 ? (size_t)INDEX_ENTRIES * 4 : 0);
+
+    size_t need = _recordBase + (size_t)_count * RECORD_SIZE;
+    if (_count == 0 || need > total)
+    {
+        _log("[IME] dictionary size mismatch: need %u, have %u\n",
+             (unsigned)need, (unsigned)total);
+        return false;
+    }
+
+    // Copy the prefix index into RAM (little-endian uint32s, 2.7 KB). If absent
+    // (legacy WUB1), leave _index empty and fall back to full-range search.
+    _index.clear();
+    if (v2)
+    {
+        _index.resize(INDEX_ENTRIES);
+        for (int k = 0; k < INDEX_ENTRIES; k++)
+        {
+            const uint8_t *p = hdrIndex + HEADER_SIZE + (size_t)k * 4;
+            _index[k] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        }
+    }
+    return true;
+}
+
 bool IME::begin()
 {
     if (_loaded)
         return true;
 
+#ifdef WUBI_EMBEDDED
+    // Dictionary is memory-mapped in flash - no SD, no file handle.
+    _blob = WUBI_BLOB_START;
+    _blobSize = (size_t)(WUBI_BLOB_END - WUBI_BLOB_START);
+    if (_blobSize < HEADER_SIZE || !parseHeader(_blob, _blobSize))
+    {
+        _blob = nullptr;
+        return false;
+    }
+    _loaded = true;
+    _log("[IME] ready: %u Wubi records, %s index (embedded in flash, %u bytes)\n",
+         (unsigned)_count, _index.empty() ? "no" : "prefix", (unsigned)_blobSize);
+    return true;
+#else
     if (!gfs())
         return false;
 
@@ -26,53 +93,20 @@ bool IME::begin()
     }
 
     size_t size = _file.size();
-    uint8_t header[HEADER_SIZE];
-    bool v2 = false;
-    if (size < HEADER_SIZE || _file.read(header, HEADER_SIZE) != HEADER_SIZE ||
-        !((v2 = memcmp(header, WUBI_MAGIC_V2, 4) == 0) ||
-          memcmp(header, WUBI_MAGIC_V1, 4) == 0))
+    // Read the header + (for WUB2) the whole index in one shot so parseHeader
+    // can work on a contiguous buffer.
+    std::vector<uint8_t> hdr(HEADER_SIZE + (size_t)INDEX_ENTRIES * 4);
+    if (size < HEADER_SIZE || !readFull(hdr.data(), min(hdr.size(), size)))
     {
         _log("[IME] bad/short dictionary header (%u bytes)\n", (unsigned)size);
         _file.close();
         return false;
     }
 
-    _count = (uint32_t)header[4] | ((uint32_t)header[5] << 8) |
-             ((uint32_t)header[6] << 16) | ((uint32_t)header[7] << 24);
-
-    // WUB2 stores the prefix index between the header and the records.
-    _recordBase = HEADER_SIZE + (v2 ? (size_t)INDEX_ENTRIES * 4 : 0);
-
-    // sanity check the declared size against the actual file
-    size_t need = _recordBase + (size_t)_count * RECORD_SIZE;
-    if (_count == 0 || need > size)
+    if (!parseHeader(hdr.data(), size))
     {
-        _log("[IME] dictionary size mismatch: need %u, have %u\n",
-             (unsigned)need, (unsigned)size);
         _file.close();
         return false;
-    }
-
-    // Pull the prefix index into RAM in one read (little-endian uint32s). If it
-    // can't be read, leave _index empty and fall back to full-range search.
-    if (v2)
-    {
-        std::vector<uint8_t> raw((size_t)INDEX_ENTRIES * 4);
-        _index.clear();
-        if (_file.seek(HEADER_SIZE) && readFull(raw.data(), raw.size()))
-        {
-            _index.resize(INDEX_ENTRIES);
-            for (int k = 0; k < INDEX_ENTRIES; k++)
-            {
-                const uint8_t *p = &raw[(size_t)k * 4];
-                _index[k] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-            }
-        }
-        else
-        {
-            _log("[IME] prefix index unreadable; using full-range search\n");
-        }
     }
 
     // The file stays open between lookups; records are read on demand (no large
@@ -82,11 +116,11 @@ bool IME::begin()
     _log("[IME] ready: %u Wubi records, %s index (streamed from SD)\n",
          (unsigned)_count, _index.empty() ? "no" : "prefix");
     return true;
+#endif
 }
 
-// Close the dictionary handle so the editor can safely mutate the SD FAT tree
-// (rename/remove) during a save. The RAM index/count are kept, so reopening is
-// just an open() - no reparse. Called from Editor::saveFile().
+// Close the SD dictionary handle so the editor can safely mutate the SD FAT
+// tree (rename/remove) during a save. No-op in the embedded (flash) build.
 void IME::suspend()
 {
     if (_open)
@@ -96,11 +130,12 @@ void IME::suspend()
     }
 }
 
-// Lazily reopen the dictionary after suspend(). The header/index are already in
-// RAM, so this only needs to reacquire the file handle. Returns false (and
-// leaves _open false) if the reopen fails - callers then read nothing.
+// Lazily reopen the SD dictionary after suspend(). Always true (no-op) in the
+// embedded build. Returns false only when an SD reopen fails.
 bool IME::ensureOpen()
 {
+    if (_blob)
+        return true; // embedded: nothing to open
     if (_open)
         return true;
     if (!_loaded || !gfs())
@@ -131,16 +166,24 @@ bool IME::readFull(uint8_t *dst, size_t n)
     return true;
 }
 
-// Read the fixed-width fields of record `i` directly from the open file.
+// Read the 4-byte code of record `i` (NUL-terminated). Embedded: a pointer read
+// from flash; SD: a seek + read from the open file.
 bool IME::readCode(uint32_t i, char out[5])
 {
-    if (!ensureOpen())
-        return false;
     uint8_t rec[4];
-    if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE))
-        return false;
-    if (_file.read(rec, 4) != 4)
-        return false;
+    if (_blob)
+    {
+        memcpy(rec, _blob + _recordBase + (size_t)i * RECORD_SIZE, 4);
+    }
+    else
+    {
+        if (!ensureOpen())
+            return false;
+        if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE))
+            return false;
+        if (_file.read(rec, 4) != 4)
+            return false;
+    }
     int n = 0;
     for (; n < 4 && rec[n]; n++)
         out[n] = (char)rec[n];
@@ -150,13 +193,20 @@ bool IME::readCode(uint32_t i, char out[5])
 
 bool IME::readHanzi(uint32_t i, char out[4])
 {
-    if (!ensureOpen())
-        return false;
     uint8_t rec[3];
-    if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE + 4))
-        return false;
-    if (_file.read(rec, 3) != 3)
-        return false;
+    if (_blob)
+    {
+        memcpy(rec, _blob + _recordBase + (size_t)i * RECORD_SIZE + 4, 3);
+    }
+    else
+    {
+        if (!ensureOpen())
+            return false;
+        if (!_file.seek(_recordBase + (size_t)i * RECORD_SIZE + 4))
+            return false;
+        if (_file.read(rec, 3) != 3)
+            return false;
+    }
     out[0] = (char)rec[0];
     out[1] = (char)rec[1];
     out[2] = (char)rec[2];
