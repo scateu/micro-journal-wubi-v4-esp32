@@ -66,10 +66,17 @@ int cjk_width = 14;
 static lgfx::U8g2font g_profont22(u8g2_font_profont12_tf);
 static const lgfx::IFont *g_cjkFont = &fonts::efontCN_12;
 
-// Lines will be rendered at the bottom on the screen
-// need to calculate the Y position considering the status bar height
+// Lines are rendered at the bottom of the screen (above the status bar).
+// `editY` is the bottom text row. The edit/cursor line is NOT pinned to the
+// bottom: it renders at `cursorRowY`, two rows up, so the following two lines
+// of the document stay visible below it (a normal editor feel). The Wubi IME
+// candidate bar overlays the very bottom row (`imeBarY`) only while composing,
+// so it never covers the edit line.
 const int editY = 96;
-int cursorY = editY + font_height - 1;
+// rows kept visible BELOW the edit/cursor line (following document lines).
+const int LINES_BELOW_CURSOR = 2;
+int cursorRowY = editY - LINES_BELOW_CURSOR * font_height; // edit line render Y
+int imeBarY = editY;                                       // IME bar row (bottom)
 const int cursorHeight = 2;
 
 // Some flags
@@ -95,18 +102,23 @@ void WP_set_font_size(int level)
     font_height = f.height;
     font_baseline = f.baseline;
     cjk_width = f.width * 2;
-    cursorY = editY + font_height - 1;
+    // Edit/cursor line sits LINES_BELOW_CURSOR rows up from the bottom, so the
+    // following document lines show below it; IME bar overlays the bottom row.
+    cursorRowY = editY - LINES_BELOW_CURSOR * font_height;
+    if (cursorRowY < 0)
+        cursorRowY = 0;
+    imeBarY = editY;
 
     g_profont22 = lgfx::U8g2font(f.latin);
     g_cjkFont = f.cjk;
 
     // cols = display columns that fit the 240px width (Latin = 1 col of
-    // font_width; a hanzi = 2 cols). rows = text lines above the edit line
-    // (editY / font_height). Set the grid directly and re-wrap - NOT via
-    // Editor::init(), which calls resetBuffer() and would erase the open
+    // font_width; a hanzi = 2 cols). rows = scrollback lines shown ABOVE the
+    // edit line (cursorRowY / font_height). Set the grid directly and re-wrap -
+    // NOT via Editor::init(), which calls resetBuffer() and would erase the open
     // document when the size is changed mid-editing.
     int cols = screen_width / font_width;
-    int rows = editY / font_height;
+    int rows = cursorRowY / font_height;
     if (rows < 1)
         rows = 1;
     Editor::getInstance().cols = cols;
@@ -115,6 +127,24 @@ void WP_set_font_size(int level)
 
     // full repaint at the new size
     clear_background = true;
+}
+
+// Y at which the edit/cursor line renders. Normally cursorRowY (LINES_BELOW_
+// CURSOR rows up from the bottom), so following lines show below. But near the
+// END of the document there aren't that many following lines, so the cursor
+// line is allowed to drop toward the bottom by the shortfall - at true EOF it
+// reaches editY. This lets the cursor move down into the bottom rows instead of
+// being stuck LINES_BELOW_CURSOR rows up with empty rows beneath it.
+static int WP_cursor_row_y()
+{
+    int cursorLine = Editor::getInstance().cursorLine;
+    int totalLine = Editor::getInstance().totalLine;
+    int linesBelow = totalLine - cursorLine;
+    if (linesBelow < 0)
+        linesBelow = 0;
+    if (linesBelow > LINES_BELOW_CURSOR)
+        linesBelow = LINES_BELOW_CURSOR;
+    return cursorRowY + (LINES_BELOW_CURSOR - linesBelow) * font_height;
 }
 
 //
@@ -164,6 +194,13 @@ void WP_render()
     // CLEAR BACKGROUND
     WP_render_clear();
 
+    // Whether this frame is doing a full redraw. Captured now because
+    // WP_render_ime() (below) may REQUEST a full redraw for the NEXT frame by
+    // setting clear_background = true (when composition just ended and the bar
+    // needs erasing); that request must survive to next frame, so we only clear
+    // the flag if it was already set at the start of this frame.
+    bool full_redraw_this_frame = clear_background;
+
     // RENDER TEXT
     WP_render_text();
 
@@ -176,7 +213,7 @@ void WP_render()
     // CHINESE IME CANDIDATE BAR (drawn last so it sits on top)
     WP_render_ime();
 
-    if (clear_background)
+    if (full_redraw_this_frame)
         clear_background = false;
 
     // Editor House Keeping Tasks
@@ -186,10 +223,11 @@ void WP_render()
 //
 // Wubi IME candidate bar.
 //
-// While the user is composing a Wubi code, an overlay strip is drawn over the
-// edit line showing the typed code and the numbered candidate hanzi. When the
-// composition clears, the strip is wiped once so the underlying text reappears
-// on the next frame.
+// While the user is composing a Wubi code, an overlay strip (imeBarY == the
+// bottom row) is drawn showing the typed code and the numbered candidate hanzi.
+// No row is permanently reserved for it, so when idle the document uses the full
+// screen height. When composition clears, the strip is wiped and the document
+// line it overlaid is repainted.
 void WP_render_ime()
 {
 #ifdef USE_IME
@@ -202,24 +240,24 @@ void WP_render_ime()
     static bool was_composing = false;
     bool composing = ime.active() && ime.composing();
 
-    // The bar covers the edit line and the row just below it.
-    const int barY = editY;
+    // The candidate bar OVERLAYS the bottom row (imeBarY == editY) only while
+    // composing - no row is permanently reserved for it. The edit/cursor line
+    // sits LINES_BELOW_CURSOR rows above the bottom, so the bar never covers it.
+    const int barY = imeBarY;
     const int barH = font_height + cursorHeight + 3;
 
     if (!composing)
     {
-        // Just stopped composing (candidate committed or cancelled). Clear only
-        // the bar strip and repaint the edit line underneath it - a full-screen
-        // clear here caused a visible flash on every committed hanzi.
+        // Just stopped composing (candidate committed or cancelled). The bar
+        // covered one or more document rows at the bottom; force a full redraw
+        // next frame so whatever it hid is restored correctly (computing the
+        // exact covered line is fragile - the bar is taller than one row and
+        // the covered line index varies near EOF). One clean repaint, no flash
+        // per keystroke since this only runs on the composing->idle edge.
         if (was_composing)
         {
-            M5Cardputer.Display.fillRect(0, barY, screen_width, barH, background_color);
-
-            M5Cardputer.Display.setFont(&g_profont22);
-            M5Cardputer.Display.setTextColor(foreground_color, background_color);
-            WP_render_line(Editor::getInstance().cursorLine, editY);
-
             was_composing = false;
+            clear_background = true;
         }
         return;
     }
@@ -310,28 +348,38 @@ void WP_render_text()
     // initiate sprite
     if (clear_background)
     {
-        int rows = Editor::getInstance().rows;
+        int editLineY = WP_cursor_row_y(); // usually cursorRowY, lower near EOF
 
-        // Anchor the scrollback UPWARD from the edit line so the vertical gap
-        // between every row - including the last scrollback row and the edit
-        // line - is exactly font_height. (Drawing top-down from y=0 left an
-        // uneven gap, because editY is fixed while the rows step by font_height
-        // and rows*font_height rarely equals editY.)
-        for (int i = cursorLine - rows; i < cursorLine; i++)
+        // Scrollback lines are anchored UPWARD from the edit line (line i at
+        // editLineY - (cursorLine - i)*font_height, gap always font_height).
+        // Walk up until we run off the top of the screen or out of lines - this
+        // fills the top rows even when the edit line has dropped toward the
+        // bottom near EOF (using a fixed row count left blank rows at the top).
+        for (int i = cursorLine - 1; i >= 0; i--)
         {
-            int y = editY - (cursorLine - i) * font_height;
-            if (i >= 0 && y >= 0)
-                WP_render_line(i, y);
+            int y = editLineY - (cursorLine - i) * font_height;
+            if (y < 0)
+                break;
+            WP_render_line(i, y);
         }
 
         // the edit line itself
-        WP_render_line(cursorLine, editY);
+        WP_render_line(cursorLine, editLineY);
+
+        // following lines below the cursor (down to the bottom row)
+        for (int i = cursorLine + 1; i <= totalLine; i++)
+        {
+            int y = editLineY + (i - cursorLine) * font_height;
+            if (y > editY)
+                break;
+            WP_render_line(i, y);
+        }
     }
     else if (clear_editline)
     {
         // Only the edit line changed - repaint just that line. Doing this only
         // on an actual change (not every idle frame) stops the shimmer.
-        WP_render_line(cursorLine, editY);
+        WP_render_line(cursorLine, WP_cursor_row_y());
     }
 }
 
@@ -455,6 +503,10 @@ void WP_render_cursor()
     if (cursorLinePos < Editor::getInstance().lineLengths[cursorLine])
         cursorW = WP_glyph_width(line, cursorLinePos);
 
+    // The cursor underline sits under the edit line, which is not pinned to the
+    // bottom (it drops toward editY near EOF - see WP_cursor_row_y).
+    int cursorLineY = WP_cursor_row_y() + font_height - 1;
+
     // Blink the cursor every 500 ms
     static bool blink = false;
     static unsigned int last = millis();
@@ -464,21 +516,19 @@ void WP_render_cursor()
         blink = !blink;
     }
 
-    // Delete previous cursor line
-    if (cursorX != cursorX_prev)
+    // Erase the previous cursor underline if it moved (in X or Y).
+    static int cursorY_prev = cursorLineY;
+    if (cursorX != cursorX_prev || cursorLineY != cursorY_prev)
     {
-        //
-        M5Cardputer.Display.fillRect(cursorX_prev, cursorY, cjk_width, cursorHeight, background_color);
-
-        //
+        M5Cardputer.Display.fillRect(cursorX_prev, cursorY_prev, cjk_width, cursorHeight, background_color);
         cursorX_prev = cursorX;
+        cursorY_prev = cursorLineY;
     }
 
-    // Cursor Blink will be always at the bottom of the screen
     if (blink)
-        M5Cardputer.Display.fillRect(cursorX, cursorY, cursorW, cursorHeight, foreground_color);
+        M5Cardputer.Display.fillRect(cursorX, cursorLineY, cursorW, cursorHeight, foreground_color);
     else
-        M5Cardputer.Display.fillRect(cursorX, cursorY, cursorW, cursorHeight, background_color);
+        M5Cardputer.Display.fillRect(cursorX, cursorLineY, cursorW, cursorHeight, background_color);
 }
 
 //
@@ -651,17 +701,22 @@ void WP_render_clear()
 
     //
     static int bufferSize_prev = 0;
+    static int totalLine_prev = 0;
     int bufferSize = Editor::getInstance().getBufferSize();
+    int totalLine = Editor::getInstance().totalLine;
 
     // start each frame assuming nothing needs erasing
     clear_editline = false;
 
-    // A change of line (new line, word-wrap onto a new row, arrow to another
-    // row, paging) needs the whole text area redrawn.
-    if (cursorLine_prev != cursorLine)
+    // A change of line (arrow to another row, paging) OR a change in the number
+    // of lines (delete/join a line, word-wrap adding/removing a row, paste)
+    // needs the whole text area redrawn - otherwise lines that shift up/down
+    // leave stale copies behind (the deleted line "overlays").
+    if (cursorLine_prev != cursorLine || totalLine_prev != totalLine)
     {
         clear_background = true;
         cursorLine_prev = cursorLine;
+        totalLine_prev = totalLine;
     }
 
     // Any edit or cursor move that stays on the same line only needs that one
@@ -674,6 +729,7 @@ void WP_render_clear()
 
     cursorPos_prev = cursorPos;
     bufferSize_prev = bufferSize;
+    totalLine_prev = totalLine;
 
     // FULL CLEAR
     if (clear_background)
@@ -687,11 +743,14 @@ void WP_render_clear()
     }
     // EDIT-LINE CLEAR: wipe just the strip the edit line occupies (including
     // the cursor underline row) so stale glyphs don't linger after a backspace.
+    // Must use the edit line's ACTUAL Y (WP_cursor_row_y), which drops toward
+    // the bottom near EOF - clearing the fixed cursorRowY there erased a
+    // higher scrollback line (e.g. line 6) that was never repainted.
     else if (clear_editline)
     {
         M5Cardputer.Display.fillRect(
             0,
-            editY,
+            WP_cursor_row_y(),
             M5Cardputer.Display.width(),
             font_height + cursorHeight + 1,
             background_color);
