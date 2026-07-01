@@ -7,4 +7,7 @@ data/config.json
 
 # Wubi dictionary source tables (build inputs for tools/gen_wubi.py)
 tools/wubi86.dict.yaml
-tools/wubi.ywvim
+tools/__pycache__
+
+../.DS_Store
+.DS_Store
