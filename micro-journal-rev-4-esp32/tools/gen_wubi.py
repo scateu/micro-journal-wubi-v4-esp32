@@ -20,8 +20,9 @@ rime table lacked, e.g. `ssss 木`, `yygy 文`.
 
 Binary format (little-endian), consumed by src/service/IME/IME.cpp:
 
-  magic   : 4 bytes  "WUB1"
+  magic   : 4 bytes  "WUB2"
   count   : uint32   number of records
+  index   : 677 * uint32   first-two-letter prefix index (see below)
   records : count * 8 bytes, sorted ascending by code:
               code  : 4 bytes  ASCII a-z, NUL-padded (never NUL-prefixed)
               hanzi : 3 bytes  UTF-8 (BMP CJK is always 3 bytes)
@@ -29,6 +30,17 @@ Binary format (little-endian), consumed by src/service/IME/IME.cpp:
 
 Within one code the records keep the source table's candidate order (best first),
 so the device can binary-search a code prefix and read candidates already ranked.
+
+Prefix index (the speed-up): a flat lower-bound table over the first TWO code
+letters. Entry k (k = (c0-'a')*26 + (c1-'a')) holds the record index of the first
+record whose code is >= that two-letter prefix; entry 676 is a sentinel == count.
+It is monotonic non-decreasing, so for any bucket k the records for that prefix are
+[index[k], index[k+1]). This lets the device jump straight to a ~hundreds-record
+window and binary-search inside it, instead of seeking through all ~33k records.
+A one-letter query `a` uses [index[(a-'a')*26], index[(a-'a'+1)*26]).
+
+The older "WUB1" format had no index (magic + count + records); the device still
+reads it by falling back to a full-range search.
 
 Usage:
   python3 tools/gen_wubi.py [--src /tmp/wubi.ywvim] [--top N] [--out data/wubi86.bin]
@@ -42,7 +54,41 @@ import os
 import struct
 import sys
 
-MAGIC = b"WUB1"
+MAGIC = b"WUB2"
+INDEX_ENTRIES = 26 * 26 + 1  # 677: one lower-bound per two-letter prefix + sentinel
+
+
+def build_prefix_index(records, count):
+    """Return a list of INDEX_ENTRIES record indices (lower bounds).
+
+    index[k] = first record index whose code sorts >= the two-letter prefix that k
+    encodes, where k = (c0-'a')*26 + (c1-'a'). Monotonic; index[676] == count.
+    Records are already sorted ascending by code.
+    """
+    index = [count] * INDEX_ENTRIES
+    # Walk buckets in reverse and fill each with the start of the next-or-equal
+    # bucket, so gaps (prefixes with no records) inherit the following start and
+    # yield an empty [start, start) window.
+    # First, mark the true start of every occupied bucket.
+    for i, (code, _char, _rank) in enumerate(records):
+        if len(code) < 2:
+            # one-letter code: it belongs to bucket (c0, 'a') as the earliest.
+            k = (ord(code[0]) - ord("a")) * 26
+        else:
+            k = (ord(code[0]) - ord("a")) * 26 + (ord(code[1]) - ord("a"))
+        # records are ascending, so the first record that lands in bucket k is
+        # its true start; keep only that first hit.
+        if index[k] == count:
+            index[k] = i
+    # Propagate right-to-left so empty buckets point at the next real start,
+    # making the whole array a monotonic lower-bound table.
+    nxt = count
+    for k in range(INDEX_ENTRIES - 1, -1, -1):
+        if index[k] == count:
+            index[k] = nxt
+        else:
+            nxt = index[k]
+    return index
 
 
 def is_single_hanzi(s):
@@ -112,9 +158,12 @@ def main():
     # sort by code asc; keep candidate order (rank) within a code
     records.sort(key=lambda r: (r[0], r[2]))
 
+    index = build_prefix_index(records, len(records))
+
     out = bytearray()
     out += MAGIC
     out += struct.pack("<I", len(records))
+    out += struct.pack("<%dI" % INDEX_ENTRIES, *index)
     for code, char, _rank in records:
         cb = code.encode("ascii")
         hb = char.encode("utf-8")
@@ -130,6 +179,7 @@ def main():
 
     print(f"unique hanzi : {len(set(r[1] for r in records))}")
     print(f"records      : {len(records)}")
+    print(f"index entries: {INDEX_ENTRIES} ({INDEX_ENTRIES * 4} bytes)")
     print(f"output       : {args.out}  ({len(out)} bytes)")
 
 

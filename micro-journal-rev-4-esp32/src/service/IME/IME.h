@@ -59,6 +59,14 @@ private:
     static const int RECORD_SIZE = 8;
     static const int HEADER_SIZE = 8; // magic[4] + count[4]
 
+    // First-two-letter prefix index (see tools/gen_wubi.py). A flat lower-bound
+    // table: entry k = (c0-'a')*26 + (c1-'a') holds the first record index whose
+    // code sorts >= that two-letter prefix. Entry INDEX_ENTRIES-1 is a sentinel
+    // == _count, so any bucket k covers records [_index[k], _index[k+1]).
+    // Loaded into RAM once at begin() (2708 bytes) to skip most binary-search
+    // seeks: a query jumps straight to a hundreds-record window on the SD card.
+    static const int INDEX_ENTRIES = 26 * 26 + 1; // 677
+
     bool _loaded = false;
     bool _active = false;
 
@@ -68,6 +76,19 @@ private:
     File _file;
     uint32_t _count = 0;
 
+    // Byte offset of record 0 in the file: HEADER_SIZE for the old WUB1 format,
+    // HEADER_SIZE + INDEX_ENTRIES*4 for WUB2 (which carries the prefix index).
+    size_t _recordBase = HEADER_SIZE;
+    // The prefix index, or empty when reading a legacy WUB1 file without one.
+    std::vector<uint32_t> _index;
+
+    // Narrow the search to the record window [lo,hi) that could match the typed
+    // code, using the RAM index. Falls back to the full table when no index is
+    // loaded or the code has no usable leading letters.
+    void searchWindow(const char *code, int len, uint32_t &lo, uint32_t &hi);
+
+    // Read exactly `n` bytes from the current file position (SD reads short-read).
+    bool readFull(uint8_t *dst, size_t n);
     // Read the 4-byte code of record `i` into `out` (NUL-terminated). Returns
     // false on an I/O error.
     bool readCode(uint32_t i, char out[5]);
