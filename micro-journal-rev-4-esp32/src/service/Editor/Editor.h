@@ -9,6 +9,12 @@
 
 #ifdef BOARD_ESP32_S3
 #define BUFFER_SIZE 8000
+// ESP32-S3 runs the keyboard on core 0 and the display (incl. autosave) on
+// core 1, so the text buffer is touched from both cores. Guard it with a
+// FreeRTOS recursive mutex - see Editor::lock().
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#define EDITOR_LOCKING 1
 #endif
 
 //
@@ -144,7 +150,45 @@ public:
     Editor &operator=(const Editor &) = delete;
     //////////////////////////////////
 
+    // RAII lock over the text buffer. On the ESP32-S3 the keyboard core edits
+    // the buffer while the display core autosaves it; grabbing this in both
+    // paths keeps the buffer and the SD write from racing (recursive, so a
+    // path that already holds it - e.g. keyboard() -> pageForward() ->
+    // saveFile() - doesn't deadlock). A no-op on single-core boards.
+    class Lock
+    {
+    public:
+        Lock(Editor &e) : _e(e)
+        {
+#ifdef EDITOR_LOCKING
+            if (_e._mutex)
+                xSemaphoreTakeRecursive(_e._mutex, portMAX_DELAY);
+#endif
+        }
+        ~Lock()
+        {
+#ifdef EDITOR_LOCKING
+            if (_e._mutex)
+                xSemaphoreGiveRecursive(_e._mutex);
+#endif
+        }
+        Lock(const Lock &) = delete;
+        Lock &operator=(const Lock &) = delete;
+
+    private:
+        Editor &_e;
+    };
+
 private:
     // Private constructor to prevent instantiation
-    Editor() {}
+    Editor()
+    {
+#ifdef EDITOR_LOCKING
+        _mutex = xSemaphoreCreateRecursiveMutex();
+#endif
+    }
+
+#ifdef EDITOR_LOCKING
+    SemaphoreHandle_t _mutex = nullptr;
+#endif
 };

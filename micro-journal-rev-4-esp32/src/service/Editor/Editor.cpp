@@ -6,10 +6,6 @@
 #include "service/WordCounter/WordCounter.h"
 #include "service/Tools/Tools.h"
 
-#ifdef USE_IME
-#include "service/IME/IME.h"
-#endif
-
 //
 // EDITOR CLASS IMPLEMENTATION
 //
@@ -89,12 +85,6 @@ void Editor::loadFile(String fileName)
 
     // Save filen name
     this->fileName = fileName;
-
-#ifdef USE_IME
-    // Close the Wubi dictionary handle before opening the journal (same SD
-    // volume) - see loadWindow() for why an open dict handle is unsafe here.
-    IME::getInstance().suspend();
-#endif
 
     // Open File
     File file = gfs()->open(fileName.c_str(), "r");
@@ -218,6 +208,11 @@ bool Editor::saveFile()
     }
     savingInProgress = true;
 
+    // Hold the buffer lock for the whole save: this runs on the display core
+    // (autosave from WP_render) while the keyboard core edits the buffer, so
+    // reading `buffer` for the SD write must not race a concurrent edit.
+    Lock guard(*this);
+
     //
     JsonDocument &app = status();
 
@@ -245,14 +240,6 @@ bool Editor::saveFile()
 
     //
     _log("Saving file %s\n", fileName.c_str());
-
-#ifdef USE_IME
-    // Release the Wubi dictionary's open file handle before we touch the SD
-    // FAT tree below (open/rename/remove). Holding a handle open on the volume
-    // during those operations froze the device mid-composition. The handle
-    // reopens lazily on the next lookup; the RAM index survives.
-    IME::getInstance().suspend();
-#endif
 
     // The buffer is a window onto [seekPos, seekPos+loadedLength) on disk.
     // Anything outside that window (before seekPos, after windowEnd) must
@@ -398,15 +385,6 @@ bool Editor::saveFile()
 bool Editor::loadWindow(size_t offset, size_t length)
 {
     JsonDocument &app = status();
-
-#ifdef USE_IME
-    // Close the Wubi dictionary handle before opening the journal on the same
-    // SD volume. Paging (C-p/C-n at a page boundary) reaches here even when the
-    // buffer is already saved - i.e. when saveFile()'s own suspend() was
-    // skipped by its "already saved" early-return - so an open dict handle
-    // could still collide with this open()/read() and freeze the SD driver.
-    IME::getInstance().suspend();
-#endif
 
     File file = gfs()->open(fileName.c_str(), "r");
     if (!file)
@@ -568,11 +546,6 @@ void Editor::clearFile()
         return;
     }
 
-#ifdef USE_IME
-    // Close the Wubi dictionary handle before the rename/remove/open below.
-    IME::getInstance().suspend();
-#endif
-
     // Step 1. Check if the backup file exists
     // remove it if already exists
     String backupFileName = format("/%s_backup.txt", fileName.c_str());
@@ -648,6 +621,10 @@ void Editor::keyboard(int key, bool pressed)
     // ignore non printable character
     if (key == 0 || key == 27 || key == MENU)
         return;
+
+    // Hold the buffer lock for the whole edit so the display-core autosave
+    // can't read/write the buffer while we mutate it (and vice versa).
+    Lock guard(*this);
 
     //
     _debug("Editor::keyboard:: %c [%d] pressed: %d cursorPos: %d\n", key, key, pressed, cursorPos);
