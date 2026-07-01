@@ -90,6 +90,12 @@ void Editor::loadFile(String fileName)
     // Save filen name
     this->fileName = fileName;
 
+#ifdef USE_IME
+    // Close the Wubi dictionary handle before opening the journal (same SD
+    // volume) - see loadWindow() for why an open dict handle is unsafe here.
+    IME::getInstance().suspend();
+#endif
+
     // Open File
     File file = gfs()->open(fileName.c_str(), "r");
     if (!file)
@@ -393,6 +399,15 @@ bool Editor::loadWindow(size_t offset, size_t length)
 {
     JsonDocument &app = status();
 
+#ifdef USE_IME
+    // Close the Wubi dictionary handle before opening the journal on the same
+    // SD volume. Paging (C-p/C-n at a page boundary) reaches here even when the
+    // buffer is already saved - i.e. when saveFile()'s own suspend() was
+    // skipped by its "already saved" early-return - so an open dict handle
+    // could still collide with this open()/read() and freeze the SD driver.
+    IME::getInstance().suspend();
+#endif
+
     File file = gfs()->open(fileName.c_str(), "r");
     if (!file)
     {
@@ -552,6 +567,11 @@ void Editor::clearFile()
 
         return;
     }
+
+#ifdef USE_IME
+    // Close the Wubi dictionary handle before the rename/remove/open below.
+    IME::getInstance().suspend();
+#endif
 
     // Step 1. Check if the backup file exists
     // remove it if already exists
