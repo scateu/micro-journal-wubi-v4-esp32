@@ -23,3 +23,10 @@ Additional Features:
 
 Features from upstream:
  - Fn-0..9 switch txt file
+
+Burn manually:
+
+    brew install esptool
+    See FIRMWARE_FLASH.md
+    esptool --chip auto --port /dev/tty.usbmodem21201 --baud 1500000 --before default_reset write_flash -z 0x10000 firmware-wubi.bin  # seems not enough
+
