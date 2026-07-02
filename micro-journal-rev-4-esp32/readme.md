@@ -5,7 +5,10 @@ DEMO:
 INSTALL:
 
     cd micro-journal-rev-4-esp32
-    pio run -e cardputer-adv -t upload
+    #pio run -e cardputer-adv -t upload
+    make upload-wubi
+    #make upload-pinyin
+    #make upload-shuangpin
 
 
 Additional Features:
@@ -13,6 +16,8 @@ Additional Features:
  - External USB keyboard support
  - C-space switch IME
  - C-s Save
- - Fn-0..9 switch txt file
- - Ctrl -+ =_   increase decrease font size.
+ - Ctrl -/+ =/_  increase decrease font size.
+ - Turn on while pressing `e` key to enter USB Drive Mode, to copy off txt files.
 
+Features from upstream:
+ - Fn-0..9 switch txt file
