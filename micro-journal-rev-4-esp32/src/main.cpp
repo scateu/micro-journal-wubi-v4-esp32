@@ -28,8 +28,11 @@ void setup()
     //
     display_setup();
 
-    //
-    keyboard_setup();
+    // In USB-drive (export) mode the USB peripheral is a device (Mass Storage),
+    // so the USB-host keyboard stack must NOT be started (they can't share the
+    // OTG port). Skip keyboard setup entirely.
+    if (!usbdrive_mode())
+        keyboard_setup();
 
     if (app_ready())
     {
@@ -57,8 +60,10 @@ void loop()
         display_loop();
     }
 
-    //
-    keyboard_loop();
+    // No keyboard in USB-drive (export) mode - the USB port is a Mass Storage
+    // device, not a host for the external keyboard.
+    if (!usbdrive_mode())
+        keyboard_loop();
 
     // try to yield to avoid infinite loop
     yield();

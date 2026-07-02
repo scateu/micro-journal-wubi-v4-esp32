@@ -38,6 +38,10 @@
 #include "M5Cardputer.h"
 #endif
 
+#if defined(USE_USB_DRIVE) && defined(BOARD_ESP32_S3)
+#include "service/UsbDrive/UsbDrive.h"
+#endif
+
 // When app is not ready. Such as file system is not initialized
 // then no more operation should occur.
 // this is a flag to check if the app is ready
@@ -45,6 +49,13 @@ bool _ready = false;
 bool app_ready()
 {
     return _ready;
+}
+
+// USB-drive (export) mode flag, latched at boot (see app_setup).
+bool _usbDrive = false;
+bool usbdrive_mode()
+{
+    return _usbDrive;
 }
 
 // Main object for the setup is to initialize the device
@@ -61,6 +72,45 @@ void app_setup()
 #ifdef CARDPUTER
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true); // enableKeyboard
+#endif
+
+#if defined(USE_USB_DRIVE) && defined(BOARD_ESP32_S3) && defined(CARDPUTER)
+    // Hold 'e' (export) at power-on to expose the SD/TF card to a host PC as a
+    // USB drive. In this mode the editor and USB-host keyboard are NOT started
+    // (see main.cpp / usbdrive_mode), so only the USB host owns the SD.
+    M5Cardputer.Display.setRotation(1);
+    // Let the key matrix settle, then poll a few times so a held 'e' is seen
+    // reliably at cold boot.
+    bool exportHeld = false;
+    for (int i = 0; i < 5 && !exportHeld; i++)
+    {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isKeyPressed('e'))
+            exportHeld = true;
+        delay(20);
+    }
+    if (exportHeld)
+    {
+        _usbDrive = true;
+        JsonDocument &app = status();
+
+        if (usbdrive_begin())
+        {
+            app["screen"] = USBDRIVESCREEN;
+        }
+        else
+        {
+            // no card / unreadable - report on screen
+            app["error"] = "NO SD CARD.\nInsert a TF card, then reboot.\n";
+            app["screen"] = ERRORSCREEN;
+        }
+
+        // App is "ready" enough to run the display loop for the status/error
+        // screen; skip the rest of normal setup (config, editor, MSC, etc.).
+        _ready = true;
+        _log("USB drive (export) mode\n");
+        return;
+    }
 #endif
 
 #if defined(REV7)
@@ -145,6 +195,16 @@ void app_loop()
         delay(100);
         return;
     }
+
+#if defined(USE_USB_DRIVE) && defined(BOARD_ESP32_S3)
+    // Export mode: only service the USB drive; the normal editor/services are
+    // not running (and the SD belongs to the USB host).
+    if (usbdrive_mode())
+    {
+        usbdrive_loop();
+        return;
+    }
+#endif
 
     // word count
     wordcounter_service();

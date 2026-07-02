@@ -13,6 +13,7 @@
 #define SLEEPSCREEN 4
 #define KEYBOARDSCREEN 5
 #define UPDATESCREEN 6
+#define USBDRIVESCREEN 7 // SD-card-over-USB export mode (hold 'e' at boot)
 
 // menu id
 #define MENU_HOME 0

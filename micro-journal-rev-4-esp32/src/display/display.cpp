@@ -71,6 +71,13 @@ void display_setup()
     _log("Firmware Update Screen\n");
     return;
   }
+  else if (screen == USBDRIVESCREEN)
+  {
+    // USB-drive (export) mode was selected at boot - keep that screen, do not
+    // fall through to the editor/wakeup selection below.
+    _log("USB Drive Screen\n");
+    return;
+  }
   else
   {
     //

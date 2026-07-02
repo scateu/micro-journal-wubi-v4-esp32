@@ -13,6 +13,7 @@
 #include "Update/Update.h"
 #include "Menu/Menu.h"
 #include "KeyboardScreen/KeyboardScreen.h"
+#include "UsbDriveScreen/UsbDriveScreen.h"
 
 //
 int display_CARDPUTER_core()
@@ -143,6 +144,15 @@ void display_CARDPUTER_loop()
       else
         // loop
         KeyboardScreen_render();
+    }
+
+    // USB DRIVE (export) SCREEN
+    else if (screen == USBDRIVESCREEN)
+    {
+      if (screen != screen_prev)
+        UsbDriveScreen_setup();
+      else
+        UsbDriveScreen_render();
     }
 
     //

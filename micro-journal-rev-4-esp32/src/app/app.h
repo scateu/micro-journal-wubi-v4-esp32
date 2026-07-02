@@ -19,6 +19,11 @@ void app_loop();
 // is app ready?
 bool app_ready();
 
+// True when the device booted into USB-drive (export) mode ('e' held at
+// power-on). In this mode the SD is owned by the USB host, so the normal
+// editor + USB-host keyboard must NOT be started.
+bool usbdrive_mode();
+
 // app status
 JsonDocument &status();
 
