@@ -4,35 +4,50 @@
 
 //
 // The dictionary is compiled into flash by board_build.embed_files =
-// data/wubi86.bin (see WUBI86.md). It is read in place (memory-mapped) - there
+// IME/ime_table.bin (see IME.md). It is read in place (memory-mapped) - there
 // is NO SD access for the dictionary, so nothing here can contend with journal
 // writes on the SD card. objcopy derives the symbol name from the source PATH
-// (non-idents -> '_'), so "data/wubi86.bin" becomes _binary_data_wubi86_bin_*.
+// (non-idents -> '_'), so "IME/ime_table.bin" -> _binary_IME_ime_table_bin_*.
 //
-static const uint8_t WUBI_MAGIC_V1[4] = {'W', 'U', 'B', '1'}; // no prefix index
-static const uint8_t WUBI_MAGIC_V2[4] = {'W', 'U', 'B', '2'}; // + prefix index
+static const uint8_t IME_MAGIC[4] = {'I', 'M', 'E', '3'};
 
-extern const uint8_t _binary_data_wubi86_bin_start[];
-extern const uint8_t _binary_data_wubi86_bin_end[];
+extern const uint8_t _binary_IME_ime_table_bin_start[];
+extern const uint8_t _binary_IME_ime_table_bin_end[];
 
-// Parse the WUB1/WUB2 header + prefix index from the start of the dictionary
-// blob. Fills _count, _recordBase and _index. `total` is the whole blob size.
+// Parse the IME3 header + prefix index from the start of the dictionary blob.
+// `total` is the whole (padded) slot size; `_count` bounds the real records.
 bool IME::parseHeader(const uint8_t *hdrIndex, size_t total)
 {
-    bool v2 = memcmp(hdrIndex, WUBI_MAGIC_V2, 4) == 0;
-    if (!v2 && memcmp(hdrIndex, WUBI_MAGIC_V1, 4) != 0)
+    if (memcmp(hdrIndex, IME_MAGIC, 4) != 0)
     {
         _log("[IME] bad dictionary magic\n");
         return false;
     }
 
-    _count = (uint32_t)hdrIndex[4] | ((uint32_t)hdrIndex[5] << 8) |
-             ((uint32_t)hdrIndex[6] << 16) | ((uint32_t)hdrIndex[7] << 24);
+    _scheme = (Scheme)hdrIndex[4];
+    _codeLen = hdrIndex[5];
+    if (_codeLen < 1 || _codeLen > MAX_CODE_LEN)
+    {
+        _log("[IME] bad codeLen %d\n", _codeLen);
+        return false;
+    }
+    _recordSize = _codeLen + HANZI_SIZE + FLAG_SIZE;
 
-    // WUB2 stores the prefix index between the header and the records.
-    _recordBase = HEADER_SIZE + (v2 ? (size_t)INDEX_ENTRIES * 4 : 0);
+    // Max letters the user may type per scheme.
+    switch (_scheme)
+    {
+    case PINYIN:    _maxCode = 6; break;
+    case SHUANGPIN: _maxCode = 2; break;
+    case WUBI:
+    default:        _maxCode = 4; break;
+    }
 
-    size_t need = _recordBase + (size_t)_count * RECORD_SIZE;
+    _count = (uint32_t)hdrIndex[8] | ((uint32_t)hdrIndex[9] << 8) |
+             ((uint32_t)hdrIndex[10] << 16) | ((uint32_t)hdrIndex[11] << 24);
+
+    _recordBase = HEADER_SIZE + (size_t)INDEX_ENTRIES * 4;
+
+    size_t need = _recordBase + (size_t)_count * _recordSize;
     if (_count == 0 || need > total)
     {
         _log("[IME] dictionary size mismatch: need %u, have %u\n",
@@ -40,18 +55,13 @@ bool IME::parseHeader(const uint8_t *hdrIndex, size_t total)
         return false;
     }
 
-    // Copy the prefix index into RAM (little-endian uint32s, 2.7 KB). If absent
-    // (legacy WUB1), leave _index empty and fall back to full-range search.
-    _index.clear();
-    if (v2)
+    // Copy the prefix index into RAM (little-endian uint32s, 2.7 KB).
+    _index.resize(INDEX_ENTRIES);
+    for (int k = 0; k < INDEX_ENTRIES; k++)
     {
-        _index.resize(INDEX_ENTRIES);
-        for (int k = 0; k < INDEX_ENTRIES; k++)
-        {
-            const uint8_t *p = hdrIndex + HEADER_SIZE + (size_t)k * 4;
-            _index[k] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-        }
+        const uint8_t *p = hdrIndex + HEADER_SIZE + (size_t)k * 4;
+        _index[k] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     }
     return true;
 }
@@ -62,33 +72,34 @@ bool IME::begin()
         return true;
 
     // Dictionary is memory-mapped in flash - no SD, no file handle.
-    _blob = _binary_data_wubi86_bin_start;
-    _blobSize = (size_t)(_binary_data_wubi86_bin_end - _binary_data_wubi86_bin_start);
+    _blob = _binary_IME_ime_table_bin_start;
+    _blobSize = (size_t)(_binary_IME_ime_table_bin_end - _binary_IME_ime_table_bin_start);
     if (_blobSize < HEADER_SIZE || !parseHeader(_blob, _blobSize))
     {
         _blob = nullptr;
         return false;
     }
     _loaded = true;
-    _log("[IME] ready: %u Wubi records, %s index (embedded in flash, %u bytes)\n",
-         (unsigned)_count, _index.empty() ? "no" : "prefix", (unsigned)_blobSize);
+    static const char *NAMES[] = {"Wubi", "Pinyin", "Shuangpin"};
+    _log("[IME] ready: %s, %u records, codeLen %d (embedded in flash)\n",
+         NAMES[_scheme <= SHUANGPIN ? _scheme : 0], (unsigned)_count, _codeLen);
     return true;
 }
 
-// Read the 4-byte code of record `i` (NUL-terminated) from the flash blob.
-bool IME::readCode(uint32_t i, char out[5])
+// Read the code of record `i` (NUL-terminated) from the flash blob.
+bool IME::readCode(uint32_t i, char out[MAX_CODE_LEN + 1])
 {
-    const uint8_t *rec = _blob + _recordBase + (size_t)i * RECORD_SIZE;
+    const uint8_t *rec = _blob + _recordBase + (size_t)i * _recordSize;
     int n = 0;
-    for (; n < 4 && rec[n]; n++)
+    for (; n < _codeLen && rec[n]; n++)
         out[n] = (char)rec[n];
     out[n] = '\0';
     return true;
 }
 
-bool IME::readHanzi(uint32_t i, char out[4])
+bool IME::readHanzi(uint32_t i, char out[HANZI_SIZE + 1])
 {
-    const uint8_t *rec = _blob + _recordBase + (size_t)i * RECORD_SIZE + 4;
+    const uint8_t *rec = _blob + _recordBase + (size_t)i * _recordSize + _codeLen;
     out[0] = (char)rec[0];
     out[1] = (char)rec[1];
     out[2] = (char)rec[2];
@@ -161,7 +172,7 @@ void IME::lookup()
     while (lo < hi)
     {
         uint32_t mid = lo + (hi - lo) / 2;
-        char code[5];
+        char code[7];  // MAX_CODE_LEN + 1
         if (!readCode(mid, code))
             break;
         if (strncmp(code, q, qlen) < 0)
@@ -175,13 +186,13 @@ void IME::lookup()
     // scanEnd bounds the walk to the prefix window from the index.
     for (uint32_t i = lo; i < scanEnd; i++)
     {
-        char code[5];
+        char code[7];  // MAX_CODE_LEN + 1
         if (!readCode(i, code))
             break;
         if (strncmp(code, q, qlen) != 0)
             break;
 
-        char hz[4];
+        char hz[4];      // HANZI_SIZE + 1
         if (!readHanzi(i, hz))
             break;
         String h(hz);
@@ -225,10 +236,10 @@ bool IME::handleKey(int key, String &out)
     if (!_active)
         return false;
 
-    // letters a-z (and A-Z) build the Wubi code
+    // letters a-z (and A-Z) build the code (cap depends on the scheme)
     if ((key >= 'a' && key <= 'z') || (key >= 'A' && key <= 'Z'))
     {
-        if (_code.length() < 4)
+        if ((int)_code.length() < _maxCode)
         {
             _code += (char)tolower(key);
             lookup();

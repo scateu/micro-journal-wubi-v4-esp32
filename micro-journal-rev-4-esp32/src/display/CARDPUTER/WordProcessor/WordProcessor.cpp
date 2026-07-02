@@ -591,11 +591,19 @@ void WP_render_status()
 
             if (ime_now)
             {
-                // [五] - Chinese font for the glyph, ASCII font for the brackets
+                // [五]/[拼]/[双] per active scheme - Chinese font for the glyph,
+                // ASCII font for the brackets.
+                const char *glyph = "五";
+                switch (IME::getInstance().scheme())
+                {
+                case IME::PINYIN:    glyph = "拼"; break;
+                case IME::SHUANGPIN: glyph = "双"; break;
+                default:             glyph = "五"; break;
+                }
                 M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
                 M5Cardputer.Display.drawString("[", IME_X, STATUSBAR_Y);
                 M5Cardputer.Display.setFont(&fonts::efontCN_12);
-                M5Cardputer.Display.drawString("五", IME_X + 8, STATUSBAR_Y + 1);
+                M5Cardputer.Display.drawString(glyph, IME_X + 8, STATUSBAR_Y + 1);
                 M5Cardputer.Display.setFont(&fonts::AsciiFont8x16);
                 M5Cardputer.Display.drawString("]", IME_X + 22, STATUSBAR_Y);
             }
