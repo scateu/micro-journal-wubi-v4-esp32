@@ -5,9 +5,19 @@
 .vscode/ipch
 data/config.json
 
-# Wubi dictionary source tables (build inputs for tools/gen_wubi.py)
+# Wubi dictionary source tables (build inputs for IME/gen_ime.py)
 tools/wubi86.dict.yaml
 tools/__pycache__
+IME/__pycache__
+
+# Makefile build outputs (per-scheme tables + firmware artifacts). The default
+# embedded IME/ime_table.bin IS tracked; the per-scheme ones are generated.
+IME/ime_table_wubi.bin
+IME/ime_table_pinyin.bin
+IME/ime_table_shuangpin.bin
+firmware-wubi.bin
+firmware-pinyin.bin
+firmware-shuangpin.bin
 
 ../.DS_Store
 .DS_Store
