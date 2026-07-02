@@ -298,8 +298,11 @@ bool IME::handleKey(int key, String &out)
         return true;
     }
 
-    // paging: ';' / ',' previous page, '\'' / '.' next page
-    if (key == ';' || key == ',')
+    // paging: '-' / ';' / ',' previous page, '=' / '\'' / '.' next page.
+    // '-' and '=' are the handy ones for long lists (e.g. Pinyin). Ctrl-'-'/'='
+    // (font size) is intercepted earlier by the keyboard layer, so a plain
+    // '-'/'=' only reaches here while composing.
+    if (key == '-' || key == ';' || key == ',')
     {
         if (_pageStart - PAGE_SIZE >= 0)
         {
@@ -308,7 +311,7 @@ bool IME::handleKey(int key, String &out)
         }
         return true;
     }
-    if (key == '\'' || key == '.')
+    if (key == '=' || key == '\'' || key == '.')
     {
         if (_pageStart + PAGE_SIZE < (int)_all.size())
         {

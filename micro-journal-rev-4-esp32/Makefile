@@ -44,24 +44,33 @@ table-pinyin:    IME/ime_table_pinyin.bin
 table-shuangpin: IME/ime_table_shuangpin.bin
 
 # ---- per-scheme firmware artifacts -----------------------------------------
-# `make firmware-<scheme>.bin`: embed that scheme's table, build, copy out.
-# .PHONY-ish: always rebuild (source deps are broad; keep it simple + explicit).
-firmware-%.bin: IME/ime_table_%.bin
-	cp $< $(EMBED)
-	$(PIO) run -e $(ENV)
-	cp $(BUILT) $@
-	@echo "built $@ ($* IME)"
+# The build embeds the SHARED path $(EMBED), so a scheme build MUST regenerate
+# its own table, re-copy it to $(EMBED), and rebuild every time - a cached
+# firmware-<scheme>.bin once let `upload-shuangpin` flash a stale (pinyin)
+# embed. The FORCE prereq makes the pattern rule always run. `flash=1` uploads.
+FORCE:
+.PHONY: FORCE
 
-# Friendly aliases: `make wubi` -> firmware-wubi.bin, etc.
+firmware-%.bin: FORCE
+	$(PYTHON) $(GEN) --scheme $* --src $(SRC_$*) --out IME/ime_table_$*.bin
+	cp IME/ime_table_$*.bin $(EMBED)
+	$(PIO) run -e $(ENV)$(if $(flash), -t upload)
+	cp $(BUILT) $@
+	@echo "built $@ ($* IME)$(if $(flash), + flashed)"
+
+# Friendly aliases: `make wubi` -> build firmware-wubi.bin, etc.
 .PHONY: $(SCHEMES)
 wubi:      firmware-wubi.bin
 pinyin:    firmware-pinyin.bin
 shuangpin: firmware-shuangpin.bin
 
 # ---- build that scheme + flash ---------------------------------------------
+# Reuses the firmware-<scheme>.bin recipe with flash=1, so it ALWAYS regenerates
+# + re-embeds the scheme's table before flashing - upload-shuangpin can never
+# flash a stale/other-scheme embed.
 .PHONY: upload-wubi upload-pinyin upload-shuangpin
-upload-wubi upload-pinyin upload-shuangpin: upload-%: firmware-%.bin
-	$(PIO) run -e $(ENV) -t upload
+upload-wubi upload-pinyin upload-shuangpin: upload-%:
+	$(MAKE) firmware-$*.bin flash=1
 
 # ---- plain build / flash / monitor -----------------------------------------
 # Build/flash with whatever IME/ime_table.bin is currently embedded.
