@@ -3,6 +3,7 @@ DEMO:
 
 
 INSTALL:
+
     cd micro-journal-rev-4-esp32
     pio run -e cardputer-adv -t upload
 
@@ -13,4 +14,5 @@ Additional Features:
  - C-space switch IME
  - C-s Save
  - Fn-0..9 switch txt file
+ - Ctrl -+ =_   increase decrease font size.
 
