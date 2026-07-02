@@ -2,6 +2,11 @@ DEMO:
  - <https://youtube.com/shorts/lltQv1eadMk>
  - <https://www.youtube.com/watch?v=CoNwv29xYIk>
 
+![](https://scateu.github.io/images/cardputer_typewriter.png)
+
+Introduction:
+
+ - <https://scateu.me/2026/07/02/cardputer-wubi.html> in Chinese.
 
 INSTALL:
 
