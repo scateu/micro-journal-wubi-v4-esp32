@@ -12,7 +12,6 @@ INSTALL:
     #make upload-pinyin
     #make upload-shuangpin
 
-
 Additional Features:
  - Readline Keybindings: C-n C-p C-k C-y M-f M-b C-b C-d
  - External USB keyboard support
@@ -24,9 +23,10 @@ Additional Features:
 Features from upstream:
  - Fn-0..9 switch txt file
 
-Burn manually:
+## Build firmware & Share
 
+    cd build
+    ./build_firmwares.sh
     brew install esptool
-    See FIRMWARE_FLASH.md
-    esptool --chip auto --port /dev/tty.usbmodem21201 --baud 1500000 --before default_reset write_flash -z 0x10000 firmware-wubi.bin  # seems not enough
-
+    # typewriter-*.bin is ready to distribute to M5 Burner
+    esptool --chip auto --port /dev/tty.usbmodem21201 --baud 921600 --before default_reset write_flash -z 0x0 typewriter-wubi.bin
