@@ -30,13 +30,21 @@ SRC_wubi      := IME/wubi.ywvim
 SRC_pinyin    := IME/pinyin_simp.dict.yaml
 SRC_shuangpin := IME/pinyin_simp.dict.yaml
 
+# scheme -> reserved flash slot. Wubi carries multi-hanzi phrases and needs a
+# bigger slot (896 KiB); pinyin/shuangpin are single-char and fit 512 KiB. The
+# slot size is baked into the firmware image (the embedded table is padded to
+# it), so `inject` must use a matching --slot.
+SLOT_wubi      := 917504
+SLOT_pinyin    := 524288
+SLOT_shuangpin := 524288
+
 # ---- default ---------------------------------------------------------------
 .DEFAULT_GOAL := help
 
 # ---- IME tables (no build) --------------------------------------------------
 # `make table-<scheme>` writes IME/ime_table_<scheme>.bin (a real file target).
 IME/ime_table_%.bin:
-	$(PYTHON) $(GEN) --scheme $* --src $(SRC_$*) --out $@
+	$(PYTHON) $(GEN) --scheme $* --src $(SRC_$*) --out $@ --slot $(SLOT_$*)
 
 .PHONY: table-wubi table-pinyin table-shuangpin
 table-wubi:      IME/ime_table_wubi.bin
@@ -52,7 +60,7 @@ FORCE:
 .PHONY: FORCE
 
 firmware-%.bin: FORCE
-	$(PYTHON) $(GEN) --scheme $* --src $(SRC_$*) --out IME/ime_table_$*.bin
+	$(PYTHON) $(GEN) --scheme $* --src $(SRC_$*) --out IME/ime_table_$*.bin --slot $(SLOT_$*)
 	cp IME/ime_table_$*.bin $(EMBED)
 	$(PIO) run -e $(ENV)$(if $(flash), -t upload)
 	cp $(BUILT) $@
@@ -90,7 +98,7 @@ monitor:
 FIRMWARE_BIN ?= $(BUILT)
 .PHONY: inject-wubi inject-pinyin inject-shuangpin
 inject-wubi inject-pinyin inject-shuangpin: inject-%: IME/ime_table_%.bin
-	$(PYTHON) $(INJECT) --firmware $(FIRMWARE_BIN) --table $<
+	$(PYTHON) $(INJECT) --firmware $(FIRMWARE_BIN) --table $< --slot $(SLOT_$*)
 
 # ---- housekeeping ----------------------------------------------------------
 .PHONY: clean distclean

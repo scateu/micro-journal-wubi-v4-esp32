@@ -66,14 +66,17 @@ public:
 private:
     IME() {}
 
-    // IME3 header: magic[4] + scheme[1] + codeLen[1] + reserved[2] + count[4].
-    static const int HEADER_SIZE = 12;
-    static const int HANZI_SIZE = 3; // UTF-8 BMP CJK
-    static const int FLAG_SIZE = 1;
-    // Record width = codeLen + hanzi[3] + flag[1]; codeLen comes from the header
-    // (6 in current tables). Set at begin().
+    // IME4 header: magic[4] + scheme[1] + codeLen[1] + reserved[2] + count[4] +
+    // poolBytes[4]. Records are fixed-width and reference variable-length hanzi/
+    // phrase text in a trailing string pool by (offset, len) - so phrases (工期,
+    // 葡萄牙, ...) work without breaking the binary search / prefix index.
+    static const int HEADER_SIZE = 16;
+    static const int POOLREF_SIZE = 4; // poolOff (uint24 LE) + wordLen (uint8)
+    static const int MAX_WORD_BYTES = 255; // wordLen is a single byte
+    // Record width = codeLen + poolOff[3] + wordLen[1]; codeLen comes from the
+    // header (6 in current tables). Set at begin().
     int _codeLen = 6;
-    int _recordSize = 6 + HANZI_SIZE + FLAG_SIZE;
+    int _recordSize = 6 + POOLREF_SIZE;
     // Max code letters the user can type, by scheme (wubi 4, pinyin 6, shuang 2).
     int _maxCode = 4;
     Scheme _scheme = WUBI;
@@ -100,6 +103,10 @@ private:
 
     // Byte offset of record 0 in the blob (HEADER_SIZE + INDEX_ENTRIES*4).
     size_t _recordBase = HEADER_SIZE + INDEX_ENTRIES * 4;
+    // The string pool: hanzi/phrase text, addressed by (offset, len) from each
+    // record. Starts right after the records; _poolBytes bounds it.
+    size_t _poolBase = 0;
+    size_t _poolBytes = 0;
     // The prefix index (677 lower-bound entries).
     std::vector<uint32_t> _index;
 
@@ -111,9 +118,9 @@ private:
     // _scheme, _codeLen, _recordSize, _maxCode, _count, _recordBase, _index.
     bool parseHeader(const uint8_t *hdrIndex, size_t total);
 
-    // Read record `i`'s code / 3-byte hanzi from the flash blob.
+    // Read record `i`'s code / pooled hanzi-or-phrase from the flash blob.
     bool readCode(uint32_t i, char out[MAX_CODE_LEN + 1]);
-    bool readHanzi(uint32_t i, char out[HANZI_SIZE + 1]);
+    bool readWord(uint32_t i, String &out);
 
     String _code;                   // typed Wubi letters
     std::vector<String> _all;       // all candidates for the current code

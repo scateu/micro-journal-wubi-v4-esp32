@@ -305,10 +305,16 @@ void WP_render_ime()
         M5Cardputer.Display.drawString(String((int)i + 1), x, barY + 1);
         x += font_width;
 
-        // hanzi
+        // hanzi (or multi-hanzi phrase): advance by the number of CJK glyphs,
+        // not a single glyph width, so phrases don't overlap the next candidate.
+        // Every candidate char is a 3-byte BMP CJK code point, so glyph count =
+        // byteLength / 3.
         M5Cardputer.Display.setFont(g_cjkFont);
         M5Cardputer.Display.drawString(cands[i], x, barY + 1);
-        x += cjk_width;
+        int glyphs = cands[i].length() / 3;
+        if (glyphs < 1)
+            glyphs = 1;
+        x += cjk_width * glyphs;
 
         if (x > screen_width - 16)
             break;

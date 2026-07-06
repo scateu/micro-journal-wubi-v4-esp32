@@ -9,7 +9,7 @@
 // writes on the SD card. objcopy derives the symbol name from the source PATH
 // (non-idents -> '_'), so "IME/ime_table.bin" -> _binary_IME_ime_table_bin_*.
 //
-static const uint8_t IME_MAGIC[4] = {'I', 'M', 'E', '3'};
+static const uint8_t IME_MAGIC[4] = {'I', 'M', 'E', '4'};
 
 extern const uint8_t _binary_IME_ime_table_bin_start[];
 extern const uint8_t _binary_IME_ime_table_bin_end[];
@@ -31,7 +31,7 @@ bool IME::parseHeader(const uint8_t *hdrIndex, size_t total)
         _log("[IME] bad codeLen %d\n", _codeLen);
         return false;
     }
-    _recordSize = _codeLen + HANZI_SIZE + FLAG_SIZE;
+    _recordSize = _codeLen + POOLREF_SIZE;
 
     // Max letters the user may type per scheme.
     switch (_scheme)
@@ -45,9 +45,13 @@ bool IME::parseHeader(const uint8_t *hdrIndex, size_t total)
     _count = (uint32_t)hdrIndex[8] | ((uint32_t)hdrIndex[9] << 8) |
              ((uint32_t)hdrIndex[10] << 16) | ((uint32_t)hdrIndex[11] << 24);
 
-    _recordBase = HEADER_SIZE + (size_t)INDEX_ENTRIES * 4;
+    _poolBytes = (uint32_t)hdrIndex[12] | ((uint32_t)hdrIndex[13] << 8) |
+                 ((uint32_t)hdrIndex[14] << 16) | ((uint32_t)hdrIndex[15] << 24);
 
-    size_t need = _recordBase + (size_t)_count * _recordSize;
+    _recordBase = HEADER_SIZE + (size_t)INDEX_ENTRIES * 4;
+    _poolBase = _recordBase + (size_t)_count * _recordSize;
+
+    size_t need = _poolBase + _poolBytes;
     if (_count == 0 || need > total)
     {
         _log("[IME] dictionary size mismatch: need %u, have %u\n",
@@ -97,13 +101,20 @@ bool IME::readCode(uint32_t i, char out[MAX_CODE_LEN + 1])
     return true;
 }
 
-bool IME::readHanzi(uint32_t i, char out[HANZI_SIZE + 1])
+// Read record `i`'s hanzi/phrase from the string pool. The record stores a
+// uint24 LE offset into the pool + a 1-byte length; the text is raw UTF-8.
+bool IME::readWord(uint32_t i, String &out)
 {
-    const uint8_t *rec = _blob + _recordBase + (size_t)i * _recordSize + _codeLen;
-    out[0] = (char)rec[0];
-    out[1] = (char)rec[1];
-    out[2] = (char)rec[2];
-    out[3] = '\0';
+    const uint8_t *ref = _blob + _recordBase + (size_t)i * _recordSize + _codeLen;
+    size_t off = (size_t)ref[0] | ((size_t)ref[1] << 8) | ((size_t)ref[2] << 16);
+    size_t len = ref[3];
+    if (len == 0 || off + len > _poolBytes)
+        return false;
+    const char *p = (const char *)(_blob + _poolBase + off);
+    out = "";
+    out.reserve(len);
+    for (size_t k = 0; k < len; k++)
+        out += p[k];
     return true;
 }
 
@@ -192,10 +203,9 @@ void IME::lookup()
         if (strncmp(code, q, qlen) != 0)
             break;
 
-        char hz[4];      // HANZI_SIZE + 1
-        if (!readHanzi(i, hz))
+        String h;
+        if (!readWord(i, h))
             break;
-        String h(hz);
 
         bool dup = false;
         for (auto &e : _all)

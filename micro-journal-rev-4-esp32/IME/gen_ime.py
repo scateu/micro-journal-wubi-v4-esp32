@@ -10,27 +10,39 @@ prebuilt firmware.bin without rebuilding. All IME assets live in the IME/ folder
 Schemes
 -------
   wubi       Wubi 86. Source: ywvim `IME/wubi.ywvim` [Main] section (space-sep
-             `<code> <cand1> ...`, frequency order). Codes 1-4 letters.
+             `<code> <cand1> ...`, frequency order). Codes 1-4 letters. Keeps
+             BOTH single hanzi AND multi-hanzi PHRASES (工期, 葡萄牙, ...).
   pinyin     Full Hanyu Pinyin. Source: rime `IME/pinyin_simp.dict.yaml`
              (`<char>\\t<syllable>\\t<weight>`). Syllables 1-6 letters, ranked
-             by descending weight so common chars come first.
+             by descending weight so common chars come first. Single-char.
   shuangpin  Xiaohe (小鹤) double-pinyin. Derived from the same pinyin source:
              each full syllable is mapped to its 2-letter Xiaohe code, keeping
-             the char + weight ranking. Codes are always 2 letters.
+             the char + weight ranking. Codes are always 2 letters. Single-char.
 
-IME3 binary format (little-endian), consumed by src/service/IME/IME.cpp
+IME4 binary format (little-endian), consumed by src/service/IME/IME.cpp
 ------------------------------------------------------------------------
-  magic     : 4 bytes   "IME3"
+Records are FIXED-WIDTH so the on-device binary search + prefix index are
+untouched; the (variable-length) hanzi/phrase text lives in a separate string
+pool appended after the records, referenced by (offset,len). Single-hanzi
+schemes just have len==3.
+
+  magic     : 4 bytes   "IME4"
   scheme    : 1 byte    0=wubi 1=pinyin 2=shuangpin  (drives the [五]/[拼]/[双]
                         indicator and the max input length on-device)
   codeLen   : 1 byte    fixed code width in bytes (6 for all schemes here)
   reserved  : 2 bytes   0
   count     : uint32    number of records
+  poolBytes : uint32    size of the trailing string pool in bytes
   index     : 677 * uint32   first-two-letter prefix lower-bound index
   records   : count * (codeLen + 4) bytes, sorted ascending by code:
-                code  : codeLen bytes  ASCII a-z, NUL-padded
-                hanzi : 3 bytes        UTF-8 (BMP CJK is always 3 bytes)
-                flag  : 1 byte         reserved (0)
+                code   : codeLen bytes  ASCII a-z, NUL-padded
+                poolOff: 3 bytes (uint24 LE)  byte offset into the pool
+                wordLen: 1 byte               phrase length in bytes (1..255)
+  pool      : poolBytes bytes   concatenated UTF-8 phrases (de-duplicated),
+                                addressed by (poolOff, wordLen)
+
+The pool starts immediately after the records (recordBase + count*recordSize),
+so its absolute offset is derived on-device; poolBytes bounds it.
 
 Fixed slot
 ----------
@@ -53,11 +65,14 @@ import os
 import struct
 import sys
 
-MAGIC = b"IME3"
+MAGIC = b"IME4"
 INDEX_ENTRIES = 26 * 26 + 1  # 677: one lower-bound per two-letter prefix + sentinel
 CODE_LEN = 6                  # fixed code width (fits pinyin zhuang/chuang/shuang)
-HEADER_SIZE = 12             # magic[4] + scheme[1] + codeLen[1] + reserved[2] + count[4]
+# magic[4] + scheme[1] + codeLen[1] + reserved[2] + count[4] + poolBytes[4]
+HEADER_SIZE = 16
+RECORD_EXTRA = 4             # poolOff (uint24) + wordLen (uint8)
 SLOT_SIZE_DEFAULT = 512 * 1024
+MAX_PHRASES_DEFAULT = 30000  # top-N phrases kept for wubi (0 = keep all)
 PAD_BYTE = 0xFF
 
 SCHEME_WUBI = 0
@@ -158,12 +173,20 @@ def is_single_hanzi(s):
     return len(s) == 1 and 0x4E00 <= ord(s) <= 0x9FFF
 
 
+def is_hanzi_word(s):
+    """True for a run of >=1 BMP CJK chars (a single hanzi OR a phrase)."""
+    return len(s) >= 1 and all(0x4E00 <= ord(c) <= 0x9FFF for c in s)
+
+
 # ---------------------------------------------------------------------------
 # sources
 # ---------------------------------------------------------------------------
 def load_wubi(path):
-    """Yield (code, char, score) from the ywvim [Main] section. Lower score =
-    more common (shortest code, then earliest candidate position)."""
+    """Yield (code, word, score) from the ywvim [Main] section, keeping BOTH
+    single hanzi AND multi-hanzi phrases. score = (len(code), rank, len(word))
+    so lower = more common: shortest code first (fewest keystrokes), then the
+    earlier (primary) candidate on the line, then the shorter word. This is the
+    'shortest-code-first' ranking used to trim phrases to --max-phrases."""
     in_main = False
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -181,8 +204,8 @@ def load_wubi(path):
             for cand in parts[1:]:
                 if not cand:
                     continue
-                if is_single_hanzi(cand):
-                    yield code, cand, (len(code), rank)
+                if is_hanzi_word(cand):
+                    yield code, cand, (len(code), rank, len(cand))
                 rank += 1
 
 
@@ -227,9 +250,14 @@ def main():
     ap.add_argument("--src", required=True, help="source table for the scheme")
     ap.add_argument("--out", default=os.path.join("IME", "ime_table.bin"))
     ap.add_argument("--top", type=int, default=0,
-                    help="keep only the N most common hanzi (0 = keep all)")
+                    help="keep only the N most common words (0 = keep all)")
+    ap.add_argument("--max-phrases", type=int, default=MAX_PHRASES_DEFAULT,
+                    help="wubi only: keep at most N multi-hanzi phrases, ranked "
+                         "shortest-code-first (0 = keep all). Single hanzi are "
+                         "always kept. Trims the table to fit the flash slot.")
     ap.add_argument("--slot", type=int, default=SLOT_SIZE_DEFAULT,
-                    help="reserved flash slot size in bytes (default 512 KiB)")
+                    help="reserved flash slot size in bytes (default 512 KiB; "
+                         "wubi-with-phrases uses 896 KiB = 917504)")
     args = ap.parse_args()
 
     if not os.path.exists(args.src):
@@ -253,7 +281,7 @@ def main():
 
     records = [(code, char, score) for (code, char), score in best.items()]
 
-    # optional frequency filter: rank each char by its best score, keep top N
+    # optional frequency filter: rank each word by its best score, keep top N
     if args.top > 0:
         char_best = {}
         for code, char, score in records:
@@ -262,30 +290,62 @@ def main():
         kept = set(sorted(char_best, key=lambda c: char_best[c])[:args.top])
         records = [r for r in records if r[1] in kept]
 
+    # Phrase trim (wubi has phrases; pinyin/shuangpin are single-char so this is
+    # a no-op there). Single hanzi are ALWAYS kept; multi-hanzi phrases are
+    # ranked by score (shortest-code-first) and truncated to --max-phrases so
+    # the table fits the flash slot.
+    if args.max_phrases > 0:
+        singles = [r for r in records if len(r[1]) == 1]
+        phrases = [r for r in records if len(r[1]) > 1]
+        phrases.sort(key=lambda r: r[2])
+        phrases = phrases[:args.max_phrases]
+        records = singles + phrases
+
     # sort by code asc; within a code, by score asc (most common candidate first)
     records.sort(key=lambda r: (r[0], r[2]))
     recs = [(code, char) for code, char, _ in records]
 
     index = build_prefix_index(recs, len(recs))
-    record_size = CODE_LEN + 4
+    record_size = CODE_LEN + RECORD_EXTRA
+
+    # Build the string pool: de-duplicate phrase bytes, remember each word's
+    # byte offset. Records reference (offset, len) into this pool.
+    pool = bytearray()
+    pool_off = {}
+    for _code, char in recs:
+        hb = char.encode("utf-8")
+        if hb not in pool_off:
+            pool_off[hb] = len(pool)
+            pool += hb
+    if len(pool) > 0xFFFFFF:
+        sys.exit(f"string pool {len(pool)} bytes exceeds the uint24 offset range")
+
+    rec_bytes = bytearray()
+    written = 0
+    for code, char in recs:
+        cb = code.encode("ascii")
+        hb = char.encode("utf-8")
+        if len(cb) > CODE_LEN or not (1 <= len(hb) <= 255):
+            continue
+        off = pool_off[hb]
+        rec_bytes += cb + b"\x00" * (CODE_LEN - len(cb))          # code[CODE_LEN]
+        rec_bytes += bytes((off & 0xFF, (off >> 8) & 0xFF, (off >> 16) & 0xFF))  # off u24 LE
+        rec_bytes += bytes((len(hb),))                            # wordLen u8
+        written += 1
 
     out = bytearray()
     out += MAGIC
     out += struct.pack("<BBH", scheme, CODE_LEN, 0)
-    out += struct.pack("<I", len(recs))
+    out += struct.pack("<I", written)
+    out += struct.pack("<I", len(pool))
     out += struct.pack("<%dI" % INDEX_ENTRIES, *index)
-    for code, char in recs:
-        cb = code.encode("ascii")
-        hb = char.encode("utf-8")
-        if len(cb) > CODE_LEN or len(hb) != 3:
-            continue
-        out += cb + b"\x00" * (CODE_LEN - len(cb))  # code[CODE_LEN]
-        out += hb                                    # hanzi[3]
-        out += b"\x00"                               # flag
+    out += rec_bytes
+    out += pool
 
     real = len(out)
     if real > args.slot:
-        sys.exit(f"table {real} bytes exceeds slot {args.slot}; use --top to shrink")
+        sys.exit(f"table {real} bytes exceeds slot {args.slot}; "
+                 f"lower --max-phrases or raise --slot to shrink/fit")
 
     # pad to the fixed slot with the flash-erase value
     out += bytes([PAD_BYTE]) * (args.slot - real)
@@ -294,9 +354,11 @@ def main():
     with open(args.out, "wb") as f:
         f.write(out)
 
+    n_phrases = sum(1 for _c, w in recs if len(w) > 1)
     print(f"scheme       : {args.scheme} ({scheme})")
-    print(f"unique hanzi : {len(set(r[1] for r in recs))}")
-    print(f"records      : {len(recs)}  (record size {record_size} B)")
+    print(f"unique words : {len(set(r[1] for r in recs))}  ({n_phrases} phrases > 1 char)")
+    print(f"records      : {written}  (record size {record_size} B)")
+    print(f"pool bytes   : {len(pool)}  ({len(pool_off)} unique strings)")
     print(f"real bytes   : {real}  ({real/1024:.1f} KiB)")
     print(f"slot bytes   : {args.slot}  ({args.slot/1024:.0f} KiB, {real*100//args.slot}% used)")
     print(f"output       : {args.out}")
