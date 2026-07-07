@@ -9,9 +9,11 @@ prebuilt firmware.bin without rebuilding. All IME assets live in the IME/ folder
 
 Schemes
 -------
-  wubi       Wubi 86. Source: ywvim `IME/wubi.ywvim` [Main] section (space-sep
-             `<code> <cand1> ...`, frequency order). Codes 1-4 letters. Keeps
-             BOTH single hanzi AND multi-hanzi PHRASES (工期, 葡萄牙, ...).
+  wubi       Wubi 86. Source: rime `IME/wubi86.dict.yaml` (Jidian 6 table, TSV
+             `<text>\\t<code>\\t<weight>` under a YAML header). Codes 1-4 letters,
+             ranked by descending weight (higher = more common). Restricted to
+             the GBK charset. Keeps BOTH single hanzi AND multi-hanzi PHRASES
+             (工期, 葡萄牙, ...).
   pinyin     Full Hanyu Pinyin. Source: rime `IME/pinyin_simp.dict.yaml`
              (`<char>\\t<syllable>\\t<weight>`). Syllables 1-6 letters, ranked
              by descending weight so common chars come first. Single-char.
@@ -53,7 +55,7 @@ The firmware ignores the padding (it reads `count` from the header).
 
 Usage (run from the repo root)
 ------------------------------
-  python3 IME/gen_ime.py --scheme wubi      --src IME/wubi.ywvim            --out IME/ime_table.bin
+  python3 IME/gen_ime.py --scheme wubi      --src IME/wubi86.dict.yaml      --out IME/ime_table.bin
   python3 IME/gen_ime.py --scheme pinyin    --src IME/pinyin_simp.dict.yaml --out IME/ime_table.bin
   python3 IME/gen_ime.py --scheme shuangpin --src IME/pinyin_simp.dict.yaml --out IME/ime_table.bin
 
@@ -182,31 +184,74 @@ def is_hanzi_word(s):
 # sources
 # ---------------------------------------------------------------------------
 def load_wubi(path):
-    """Yield (code, word, score) from the ywvim [Main] section, keeping BOTH
-    single hanzi AND multi-hanzi phrases. score = (len(code), rank, len(word))
-    so lower = more common: shortest code first (fewest keystrokes), then the
-    earlier (primary) candidate on the line, then the shorter word. This is the
-    'shortest-code-first' ranking used to trim phrases to --max-phrases."""
-    in_main = False
+    """Yield (code, word, score) from a rime wubi86 `.dict.yaml`, keeping BOTH
+    single hanzi AND multi-hanzi phrases, restricted to the GBK charset.
+
+    The rime dict is TSV under a YAML header ended by `...`. Columns are declared
+    in the header (`columns: [text, code, weight, stem]`) — note `text` comes
+    BEFORE `code`, unlike the old ywvim layout. `weight` is a Google-derived
+    frequency where HIGHER = more common, so score = -weight (lower = more
+    common), matching the pinyin source. Lines beginning with `#` are rime's
+    hidden alternate-code entries (e.g. `#子 b`): the char is still reachable by
+    its full code elsewhere, so we skip them like the upstream ccime2 builder.
+
+    GBK filter: the on-device display only ships GBK-range hanzi, so words with
+    any non-GBK codepoint are dropped (mirrors ccime2 `build_dict.py --gbk`)."""
+    started = False           # True once past the `...` end-of-header marker
+    in_cols = False
+    col_list = []
+    col_map = {}
+    dropped_gbk = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.rstrip("\n")
-            if line.startswith("["):
-                in_main = line.strip() == "[Main]"
+            line = line.rstrip("\n\r")
+            if line.startswith("---"):
                 continue
-            if not in_main or not line or line.startswith("#"):
+            if line.startswith("..."):
+                started = True
+                if not col_map and col_list:
+                    col_map = {c: i for i, c in enumerate(col_list)}
                 continue
-            parts = line.split(" ")
-            code = parts[0].lower()
+            if not started:
+                # still inside the YAML header: capture the `columns:` list
+                if line.startswith("columns:"):
+                    in_cols = True
+                    continue
+                if in_cols:
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        col_list.append(stripped[2:].strip())
+                        continue
+                    in_cols = False
+                continue
+            # data section
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            if not col_map:
+                col_map = {"text": 0, "code": 1}
+            word = parts[col_map["text"]]
+            code = parts[col_map["code"]].lower()
             if not (code.isascii() and code.isalpha() and 1 <= len(code) <= 4):
                 continue
-            rank = 0
-            for cand in parts[1:]:
-                if not cand:
-                    continue
-                if is_hanzi_word(cand):
-                    yield code, cand, (len(code), rank, len(cand))
-                rank += 1
+            if not is_hanzi_word(word):
+                continue
+            try:
+                word.encode("gbk")
+            except UnicodeEncodeError:
+                dropped_gbk += 1
+                continue
+            w_idx = col_map.get("weight", col_map.get("freq", 2))
+            weight = 0
+            if len(parts) > w_idx:
+                raw = parts[w_idx].strip()
+                if raw.lstrip("-").isdigit():
+                    weight = int(raw)
+            yield code, word, -weight
+    if dropped_gbk:
+        print(f"wubi: dropped {dropped_gbk} non-GBK entries", file=sys.stderr)
 
 
 def load_pinyin(path, shuangpin=False):

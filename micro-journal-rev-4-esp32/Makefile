@@ -26,7 +26,7 @@ BUILT    := .pio/build/$(ENV)/firmware.bin
 SCHEMES  := wubi pinyin shuangpin
 
 # scheme -> source table
-SRC_wubi      := IME/wubi.ywvim
+SRC_wubi      := IME/wubi86.dict.yaml
 SRC_pinyin    := IME/pinyin_simp.dict.yaml
 SRC_shuangpin := IME/pinyin_simp.dict.yaml
 

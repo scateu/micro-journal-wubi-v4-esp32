@@ -11,17 +11,15 @@ IME/
   gen_ime.py             generator  (wubi / pinyin / shuangpin -> IME4 table)
   inject_ime.py          swap the table into a prebuilt firmware.bin (no build)
   ime_table.bin          the embedded table (what the firmware compiles in)
-  wubi.ywvim             wubi 86 source
+  wubi86.dict.yaml       wubi 86 source (rime Jidian 6 table, GBK-filtered)
   pinyin_simp.dict.yaml  pinyin source (rime rime-pinyin-simp)
-  gen_wubi.py            legacy wubi-only generator (superseded by gen_ime.py)
-  wubi86.bin             legacy wubi table (superseded by ime_table.bin)
 ```
 
 Three schemes are supported, all in the same **IME4** table format:
 
 | scheme | code | indicator | source |
 |--------|------|-----------|--------|
-| `wubi` | 1–4 letters (Wubi 86) | `[五]` | `IME/wubi.ywvim` |
+| `wubi` | 1–4 letters (Wubi 86) | `[五]` | `IME/wubi86.dict.yaml` |
 | `pinyin` | 1–6 letters (full pinyin) | `[拼]` | `IME/pinyin_simp.dict.yaml` |
 | `shuangpin` | 2 letters (小鹤 / Xiaohe) | `[双]` | derived from the pinyin source |
 
@@ -61,7 +59,7 @@ python3 IME/inject_ime.py --firmware firmware_cardputer_adv.bin --table my_table
 ## 1. Generate a table — `IME/gen_ime.py`
 
 ```sh
-python3 IME/gen_ime.py --scheme wubi      --src IME/wubi.ywvim            --out IME/ime_table.bin --slot 917504
+python3 IME/gen_ime.py --scheme wubi      --src IME/wubi86.dict.yaml      --out IME/ime_table.bin --slot 917504
 python3 IME/gen_ime.py --scheme pinyin    --src IME/pinyin_simp.dict.yaml --out IME/ime_table.bin
 python3 IME/gen_ime.py --scheme shuangpin --src IME/pinyin_simp.dict.yaml --out IME/ime_table.bin
 ```
@@ -77,10 +75,9 @@ Options:
 - `--top N`      keep only the N most common words (0 = keep all).
 - `--max-phrases N`  wubi only: keep at most N multi-hanzi phrases (default
                  `30000`, 0 = keep all). Single hanzi are always kept. Phrases
-                 are ranked **shortest-code-first** (fewest keystrokes, then the
-                 primary line candidate, then shorter word) and truncated to N so
-                 the table fits the slot. The full ywvim phrase set is ~1.4 MB;
-                 30k phrases + all singles is ~856 KiB (fits the 896 KiB slot).
+                 are ranked by descending weight (most common first) and
+                 truncated to N so the table fits the slot. All singles + 30k
+                 phrases is ~796 KiB (fits the 896 KiB slot).
 - `--slot N`     reserved slot size in bytes (default `524288` = 512 KiB; wubi
                  uses `917504` = 896 KiB). Must match the firmware's reserved
                  slot.
@@ -91,8 +88,10 @@ Sources:
   `<char>\t<syllable>\t<weight>`). Candidates are ranked by descending weight so
   common characters come first. Shuangpin maps each syllable to its 2-letter
   小鹤 (Xiaohe) code.
-- **Wubi**: the ywvim `IME/wubi.ywvim` `[Main]` section — both single hanzi and
-  multi-hanzi phrases. (The shipped `IME/ime_table.bin` is the Wubi table.)
+- **Wubi**: the rime `IME/wubi86.dict.yaml` (Jidian 6 table, TSV
+  `<text>\t<code>\t<weight>` under a YAML header) — both single hanzi and
+  multi-hanzi phrases, ranked by descending weight and restricted to the GBK
+  charset. (The shipped `IME/ime_table.bin` is the Wubi table.)
 
 ### IME4 format (little-endian), consumed by `src/service/IME/IME.cpp`
 
