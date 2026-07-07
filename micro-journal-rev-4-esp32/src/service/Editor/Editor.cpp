@@ -1137,6 +1137,31 @@ void Editor::addString(const char *utf8)
         addChar((uint8_t)*p);
 }
 
+// Insert a committed IME string as a single locked edit. Mirrors the
+// forward-editing branch of keyboard() (buffer-full -> advanceWindow, addChar,
+// clear saved, updateScreen) but for a whole UTF-8 string and only ONE screen
+// refresh, so the keyboard core no longer replays each byte back through
+// display_keyboard()/updateScreen() while the display core is rendering.
+void Editor::insertCommitted(const char *utf8)
+{
+    if (!utf8 || !*utf8)
+        return;
+
+    // Hold the buffer lock for the whole insert (same lock keyboard()/saveFile()
+    // use), so this can't race the display-core autosave or render.
+    Lock guard(*this);
+
+    for (const char *p = utf8; *p; p++)
+    {
+        if (getBufferSize() >= BUFFER_SIZE)
+            advanceWindow();
+        addChar((uint8_t)*p);
+    }
+
+    this->saved = false;
+    updateScreen();
+}
+
 void Editor::removeLastChar()
 {
     int bufferSize = getBufferSize();

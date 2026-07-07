@@ -108,6 +108,13 @@ public:
     void addChar(int c);
     // Insert a UTF-8 string (e.g. a committed hanzi) at the cursor.
     void addString(const char *utf8);
+    // Insert a committed IME string (hanzi/phrase) at the cursor as ONE edit:
+    // takes the buffer lock once, handles a buffer-full flush, marks unsaved,
+    // and refreshes the screen buffer once. Used instead of replaying the UTF-8
+    // bytes as fake keystrokes through display_keyboard() (which re-entered the
+    // keyboard/IME/render path 2x per byte and let the display core race the
+    // keyboard core on the shared display during a phrase commit).
+    void insertCommitted(const char *utf8);
     void removeLastChar();
     void removeCharAtCursor();
     void removeLastWord();

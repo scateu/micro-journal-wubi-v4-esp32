@@ -47,22 +47,32 @@
 
 #ifdef USE_IME
 #include "service/IME/IME.h"
+#include "service/Editor/Editor.h"
 
-// Re-entrancy guard: while the IME is emitting the bytes of a committed hanzi
-// through display_keyboard(), those bytes must skip the IME filter.
+// Re-entrancy guard: kept as a safety net so any key event that reaches the
+// filter while a commit is being inserted is passed straight through.
 static bool ime_emitting = false;
 
-// Emit a committed hanzi (UTF-8) as if its bytes were typed. The bytes are all
-// >= 0x80, so they bypass every control-key branch and land in the editor.
+// Insert a committed hanzi/phrase (UTF-8) into the editor. Previously this
+// replayed each byte as a fake press+release through display_keyboard(), which
+// re-entered the keyboard/IME/render path 2x per byte and let the display core
+// race the keyboard core on the shared display during a multi-byte phrase
+// commit (开心, ...) - the source of the "freeze while composing, cursor still
+// blinks" hang. Now the whole string is inserted as a single locked edit with
+// one screen refresh; no re-entrancy into display_keyboard() at all.
 static void ime_emit(const String &hanzi)
 {
+  if (hanzi.length() == 0)
+    return;
+
+  // The candidate bar (and thus a commit) only exists in the word processor;
+  // insert straight into the editor buffer there. Off the editor there is
+  // nowhere to place the text, so drop it rather than poke another screen.
+  if (status()["screen"].as<int>() != WORDPROCESSOR)
+    return;
+
   ime_emitting = true;
-  for (size_t i = 0; i < hanzi.length(); i++)
-  {
-    uint8_t b = (uint8_t)hanzi[i];
-    display_keyboard(b, true, b);
-    display_keyboard(b, false, b);
-  }
+  Editor::getInstance().insertCommitted(hanzi.c_str());
   ime_emitting = false;
 }
 #endif
