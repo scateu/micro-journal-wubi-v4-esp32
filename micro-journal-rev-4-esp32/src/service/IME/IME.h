@@ -4,6 +4,18 @@
 #include <Arduino.h>
 #include <vector>
 
+#ifdef BOARD_ESP32_S3
+// The keyboard core (0) mutates the composition state (_code/_all/_page) in
+// handleKey() while the display core (1) reads it in the candidate-bar render
+// (candidates()/composition()). Guard that shared state with a FreeRTOS
+// recursive mutex - see IME::Lock. Without it, core 0 reallocating a vector or
+// String buffer mid-render leaves core 1 dereferencing freed memory -> a
+// LoadProhibited crash that presents as a freeze while the candidate bar shows.
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#define IME_LOCKING 1
+#endif
+
 //
 // Chinese Input Method (Wubi / Pinyin / Shuangpin).
 //
@@ -63,8 +75,47 @@ public:
     IME &operator=(const IME &) = delete;
     //////////////////////////////////
 
+    // RAII lock over the composition state (_code/_all/_page). The keyboard core
+    // takes it across handleKey() (the writer) while the display core takes it
+    // across the whole candidate-bar draw (the reader), so a vector/String
+    // realloc on one core never races an iteration on the other. Recursive so a
+    // path that already holds it doesn't self-deadlock. A no-op on single-core
+    // boards (PICO), matching Editor::Lock.
+    class Lock
+    {
+    public:
+        Lock(IME &m) : _m(m)
+        {
+#ifdef IME_LOCKING
+            if (_m._mutex)
+                xSemaphoreTakeRecursive(_m._mutex, portMAX_DELAY);
+#endif
+        }
+        ~Lock()
+        {
+#ifdef IME_LOCKING
+            if (_m._mutex)
+                xSemaphoreGiveRecursive(_m._mutex);
+#endif
+        }
+        Lock(const Lock &) = delete;
+        Lock &operator=(const Lock &) = delete;
+
+    private:
+        IME &_m;
+    };
+
 private:
-    IME() {}
+    IME()
+    {
+#ifdef IME_LOCKING
+        _mutex = xSemaphoreCreateRecursiveMutex();
+#endif
+    }
+
+#ifdef IME_LOCKING
+    SemaphoreHandle_t _mutex = nullptr;
+#endif
 
     // IME4 header: magic[4] + scheme[1] + codeLen[1] + reserved[2] + count[4] +
     // poolBytes[4]. Records are fixed-width and reference variable-length hanzi/

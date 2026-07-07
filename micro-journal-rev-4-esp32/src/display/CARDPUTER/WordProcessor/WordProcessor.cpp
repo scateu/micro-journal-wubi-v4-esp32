@@ -237,6 +237,13 @@ void WP_render_ime()
 
     IME &ime = IME::getInstance();
 
+    // Hold the IME lock for the whole candidate-bar section. This runs on the
+    // display core while the keyboard core mutates the composition state in
+    // handleKey(); candidates()/composition() hand back references into _page/
+    // _code, so the draw loop below must not run while core 0 reallocates them.
+    // Recursive lock, released when this function returns (all exit paths).
+    IME::Lock guard(ime);
+
     static bool was_composing = false;
     bool composing = ime.active() && ime.composing();
 

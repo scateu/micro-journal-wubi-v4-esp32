@@ -92,9 +92,16 @@ bool keyboard_ime_filter(int key, bool pressed)
     return was;
   }
 
-  // press: offer the key to the IME
+  // press: offer the key to the IME. Hold the IME lock for the whole mutation
+  // (handleKey rewrites _code/_all/_page) so the display core can't read the
+  // candidate state mid-realloc. Released before ime_emit, which re-enters the
+  // keyboard/display path and by then handleKey is done mutating.
   String hanzi;
-  bool took = ime.handleKey(key, hanzi);
+  bool took;
+  {
+    IME::Lock guard(ime);
+    took = ime.handleKey(key, hanzi);
+  }
   consumed[key] = took;
   if (took && hanzi.length() > 0)
     ime_emit(hanzi);
